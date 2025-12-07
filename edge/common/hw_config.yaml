@@ -1,0 +1,27 @@
+# 硬件参数占位，请按实测填写
+camera:
+  model: realsense_d435i
+  intrinsics:
+    fx: 0
+    fy: 0
+    cx: 0
+    cy: 0
+  distortion: []
+  depth_scale: 0.001
+
+workspace:
+  plane_z_mm: 0          # 工作平面高度基准
+  homography: []         # 3x3 单平面映射矩阵
+
+laser_galvo:
+  protocol: tcp          # tcp 或 serial
+  endpoint: "127.0.0.1:9000"
+  range:
+    x_min: -1.0
+    x_max: 1.0
+    y_min: -1.0
+    y_max: 1.0
+
+performance_budget:
+  target_fps: 15
+  max_latency_ms: 100

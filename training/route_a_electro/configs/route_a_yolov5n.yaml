@@ -1,0 +1,33 @@
+# 路线 A 电子元件 YOLOv5n 基础配置（示例）
+# 按需修改数据路径与超参
+
+dataset:
+  root: ../../datasets/yolo/route_a  # images/, labels/
+  train: train.txt
+  val: val.txt
+  test: test.txt
+  nc: 8
+  names: ["resistor", "color_resistor", "capacitor", "diode", "transistor", "ic", "led", "other"]
+
+train:
+  img_size: 640
+  batch_size: 16
+  epochs: 100
+  lr_init: 0.01
+  weight_decay: 0.0005
+  momentum: 0.937
+  warmup_epochs: 3
+  hsv_h: 0.015
+  hsv_s: 0.7
+  hsv_v: 0.4
+  mosaic: true
+  mixup: false
+
+model:
+  backbone: yolov5n
+  pretrained: true
+  ckpt: null  # 若微调可填预训练权重路径
+
+export:
+  img_size: 640
+  file_name: route_a_yolov5n
