@@ -22,7 +22,7 @@ WEBUI_DIR="$HOME/ICT/webui_http_unified"
 YOLO_MODEL="$ICT_DIR/runs/detect/train_electro61/weights/yolov8_electro61_aipp.om"
 DATA_YAML="$ICT_DIR/config/electro61.yaml"
 DANGER_DISTANCE=300
-CONF_THRES=0.55
+CONF_THRES=0.6
 
 # 创建必要目录
 mkdir -p "$LOG_DIR" "$PID_DIR" "$WEBUI_DIR"
@@ -368,8 +368,11 @@ if not html_file.exists():
 </html>''')
 
 # 启动HTTP服务器
+class ReusableTCPServer(socketserver.TCPServer):
+    allow_reuse_address = True
+
 Handler = http.server.SimpleHTTPRequestHandler
-with socketserver.TCPServer(("0.0.0.0", PORT), Handler) as httpd:
+with ReusableTCPServer(("0.0.0.0", PORT), Handler) as httpd:
     print(f"WebUI服务器运行在端口 {PORT}")
     print(f"访问: http://ict.local:{PORT}")
     httpd.serve_forever()

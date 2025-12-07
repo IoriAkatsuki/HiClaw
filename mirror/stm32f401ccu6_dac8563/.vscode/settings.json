@@ -1,0 +1,6 @@
+{
+    "files.associations": {
+        "spi.h": "c",
+        "zzy_global_head.h": "c"
+    }
+}

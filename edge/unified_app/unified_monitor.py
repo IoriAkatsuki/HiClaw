@@ -13,6 +13,7 @@ import acl
 import mediapipe as mp
 import yaml
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 class AclLiteResource:
     """ACL 资源管理"""
@@ -291,6 +292,7 @@ def main():
 
     last_ts = None
     frame_count = 0
+    last_hand_results = None  # 缓存上一次的手部检测结果
 
     try:
         while True:
@@ -322,10 +324,14 @@ def main():
 
             yolo_ms = (time.time() - t0) * 1000
 
-            # MediaPipe 手部检测
+            # MediaPipe 手部检测（每2帧检测一次）
             t1 = time.time()
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            hand_results = hands.process(frame_rgb)
+            if True:  # 只在偶数帧检测手部
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                hand_results = hands.process(frame_rgb)
+                last_hand_results = hand_results
+            else:
+                hand_results = last_hand_results
             hand_ms = (time.time() - t1) * 1000
 
             # 绘制物体检测

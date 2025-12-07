@@ -13,14 +13,7 @@ from pathlib import Path
 
 
 class LaserGalvoController:
-    """激光振镜控制器"""
-
-    # 串口命令
-    CMD_MOVE = 0x01      # 移动到指定位置
-    CMD_LASER_ON = 0x02  # 打开激光
-    CMD_LASER_OFF = 0x03 # 关闭激光
-    CMD_DRAW_LINE = 0x04 # 绘制直线
-    CMD_DRAW_BOX = 0x05  # 绘制矩形
+    """激光振镜控制器 - 适配STM32文本协议"""
 
     def __init__(self, serial_port='/dev/ttyUSB0', baudrate=115200, calibration_file=None):
         """
@@ -29,12 +22,13 @@ class LaserGalvoController:
         Args:
             serial_port: 串口设备路径
             baudrate: 波特率
-            calibration_file: 标定文件路径
+            calibration_file: 标定文件路径（可选）
         """
         self.serial_port = serial_port
         self.baudrate = baudrate
         self.ser = None
         self.homography_matrix = None
+        self.task_index = 0  # 任务索引，用于STM32协议
 
         if calibration_file:
             self.load_calibration(calibration_file)
@@ -75,225 +69,162 @@ class LaserGalvoController:
             print(f"✗ 加载标定文件失败: {e}")
             return False
 
-    def pixel_to_galvo(self, x_pixel, y_pixel):
+    def pixel_to_galvo(self, x_pixel, y_pixel, image_width=640, image_height=480):
         """
         像素坐标转振镜坐标
 
         Args:
             x_pixel: 像素X坐标
             y_pixel: 像素Y坐标
+            image_width: 图像宽度
+            image_height: 图像高度
 
         Returns:
-            (x_galvo, y_galvo): 振镜DAC值 (0-65535)
+            (x_galvo, y_galvo): 振镜坐标值 (-32768到32767，STM32 int16_t)
         """
-        if self.homography_matrix is None:
-            raise RuntimeError("未加载标定数据")
-
-        pixel_pt = np.array([[[x_pixel, y_pixel]]], dtype=np.float32)
-        galvo_pt = cv2.perspectiveTransform(pixel_pt, self.homography_matrix)
-
-        x_galvo = int(np.clip(galvo_pt[0][0][0], 0, 65535))
-        y_galvo = int(np.clip(galvo_pt[0][0][1], 0, 65535))
+        if self.homography_matrix is not None:
+            # 使用标定矩阵转换
+            pixel_pt = np.array([[[x_pixel, y_pixel]]], dtype=np.float32)
+            galvo_pt = cv2.perspectiveTransform(pixel_pt, self.homography_matrix)
+            x_galvo = int(np.clip(galvo_pt[0][0][0], -32768, 32767))
+            y_galvo = int(np.clip(galvo_pt[0][0][1], -32768, 32767))
+        else:
+            # 简单线性映射：像素坐标 -> 振镜坐标
+            # 中心为(0,0)，范围-32768到32767
+            x_galvo = int((x_pixel - image_width/2) * (65535 / image_width))
+            y_galvo = int((y_pixel - image_height/2) * (65535 / image_height))
+            x_galvo = np.clip(x_galvo, -32768, 32767)
+            y_galvo = np.clip(y_galvo, -32768, 32767)
 
         return (x_galvo, y_galvo)
 
-    def _calculate_crc16(self, data):
-        """计算CRC16校验和"""
-        crc = 0xFFFF
-        for byte in data:
-            crc ^= byte
-            for _ in range(8):
-                if crc & 0x0001:
-                    crc = (crc >> 1) ^ 0xA001
-                else:
-                    crc >>= 1
-        return crc
-
-    def _send_command(self, cmd, x=0, y=0, param=0):
+    def _send_text_command(self, command_str):
         """
-        发送命令到STM32
-
-        协议格式 (10字节):
-        [0xAA] [0x55] [CMD] [X_H] [X_L] [Y_H] [Y_L] [PARAM] [CRC_H] [CRC_L]
+        发送文本命令到STM32
 
         Args:
-            cmd: 命令字节
-            x: X坐标 (0-65535)
-            y: Y坐标 (0-65535)
-            param: 附加参数
+            command_str: 命令字符串（如 "R0 1000,2000,3000,4000"）
         """
         if self.ser is None or not self.ser.is_open:
             return False
 
-        # 构建数据包
-        packet = bytearray([
-            0xAA, 0x55,  # 帧头
-            cmd,         # 命令
-            (x >> 8) & 0xFF,  # X高字节
-            x & 0xFF,         # X低字节
-            (y >> 8) & 0xFF,  # Y高字节
-            y & 0xFF,         # Y低字节
-            param             # 参数
-        ])
-
-        # 计算CRC
-        crc = self._calculate_crc16(packet)
-        packet.append((crc >> 8) & 0xFF)  # CRC高字节
-        packet.append(crc & 0xFF)         # CRC低字节
-
         try:
-            self.ser.write(packet)
+            # 发送命令（添加换行符）
+            cmd_bytes = (command_str + '\n').encode('utf-8')
+            self.ser.write(cmd_bytes)
+            time.sleep(0.005)  # 短暂延迟确保STM32处理
             return True
         except Exception as e:
             print(f"✗ 发送命令失败: {e}")
             return False
 
-    def move_to(self, x_galvo, y_galvo):
+    def update_tasks(self):
+        """发送更新标志，让STM32切换到新的任务缓冲区"""
+        return self._send_text_command('U')
+
+    def draw_circle(self, x_galvo, y_galvo, radius, task_index=None):
         """
-        移动到指定振镜坐标
+        发送绘制圆形命令
 
         Args:
-            x_galvo: X轴DAC值 (0-65535)
-            y_galvo: Y轴DAC值 (0-65535)
+            x_galvo: 中心X坐标 (int16)
+            y_galvo: 中心Y坐标 (int16)
+            radius: 半径
+            task_index: 任务索引（0-9），默认自动递增
         """
-        return self._send_command(self.CMD_MOVE, x_galvo, y_galvo)
+        if task_index is None:
+            task_index = self.task_index
+            self.task_index = (self.task_index + 1) % 10
 
-    def move_to_pixel(self, x_pixel, y_pixel):
+        cmd = f"C{task_index} {x_galvo},{y_galvo},{radius}"
+        return self._send_text_command(cmd)
+
+    def draw_box(self, box, pixel_coords=True, task_index=None, image_width=640, image_height=480):
         """
-        移动到指定像素坐标
-
-        Args:
-            x_pixel: 像素X坐标
-            y_pixel: 像素Y坐标
-        """
-        x_galvo, y_galvo = self.pixel_to_galvo(x_pixel, y_pixel)
-        return self.move_to(x_galvo, y_galvo)
-
-    def laser_on(self):
-        """打开激光"""
-        return self._send_command(self.CMD_LASER_ON)
-
-    def laser_off(self):
-        """关闭激光"""
-        return self._send_command(self.CMD_LASER_OFF)
-
-    def draw_line(self, x1_galvo, y1_galvo, x2_galvo, y2_galvo, steps=20):
-        """
-        绘制直线
-
-        Args:
-            x1_galvo, y1_galvo: 起点振镜坐标
-            x2_galvo, y2_galvo: 终点振镜坐标
-            steps: 插值步数
-        """
-        # 移动到起点
-        self.move_to(x1_galvo, y1_galvo)
-        time.sleep(0.01)
-
-        # 打开激光
-        self.laser_on()
-        time.sleep(0.01)
-
-        # 插值移动
-        for i in range(steps + 1):
-            t = i / steps
-            x = int(x1_galvo + t * (x2_galvo - x1_galvo))
-            y = int(y1_galvo + t * (y2_galvo - y1_galvo))
-            self.move_to(x, y)
-            time.sleep(0.005)  # 控制绘制速度
-
-        # 关闭激光
-        self.laser_off()
-
-    def draw_box(self, box, steps_per_edge=20, pixel_coords=True):
-        """
-        绘制矩形边界框
+        绘制矩形边界框（发送R命令到STM32）
 
         Args:
             box: 边界框，格式为 [x1, y1, x2, y2]
-            steps_per_edge: 每条边的插值步数
             pixel_coords: box是否为像素坐标（True）还是振镜坐标（False）
+            task_index: 任务索引（0-9），默认自动递增
+            image_width: 图像宽度（用于像素转换）
+            image_height: 图像高度（用于像素转换）
         """
         x1, y1, x2, y2 = box
 
         if pixel_coords:
-            # 转换四个角点
-            tl_galvo = self.pixel_to_galvo(x1, y1)  # 左上
-            tr_galvo = self.pixel_to_galvo(x2, y1)  # 右上
-            br_galvo = self.pixel_to_galvo(x2, y2)  # 右下
-            bl_galvo = self.pixel_to_galvo(x1, y2)  # 左下
+            # 计算中心点和尺寸
+            center_x_pixel = (x1 + x2) / 2
+            center_y_pixel = (y1 + y2) / 2
+            width_pixel = abs(x2 - x1)
+            height_pixel = abs(y2 - y1)
+
+            # 转换中心点到振镜坐标
+            center_x_galvo, center_y_galvo = self.pixel_to_galvo(
+                center_x_pixel, center_y_pixel, image_width, image_height
+            )
+
+            # 计算振镜坐标系中的宽度和高度（简单比例缩放）
+            width_galvo = int(width_pixel * (65535 / image_width))
+            height_galvo = int(height_pixel * (65535 / image_height))
         else:
-            tl_galvo = (x1, y1)
-            tr_galvo = (x2, y1)
-            br_galvo = (x2, y2)
-            bl_galvo = (x1, y2)
+            # 已经是振镜坐标
+            center_x_galvo = int((x1 + x2) / 2)
+            center_y_galvo = int((y1 + y2) / 2)
+            width_galvo = abs(x2 - x1)
+            height_galvo = abs(y2 - y1)
 
-        corners = [tl_galvo, tr_galvo, br_galvo, bl_galvo]
+        # 发送矩形绘制命令
+        if task_index is None:
+            task_index = self.task_index
+            self.task_index = (self.task_index + 1) % 10
 
-        # 移动到第一个角点
-        self.move_to(*corners[0])
-        time.sleep(0.02)
+        cmd = f"R{task_index} {center_x_galvo},{center_y_galvo},{width_galvo},{height_galvo}"
+        return self._send_text_command(cmd)
 
-        # 打开激光
-        self.laser_on()
-        time.sleep(0.01)
-
-        # 绘制四条边
-        for i in range(4):
-            start = corners[i]
-            end = corners[(i + 1) % 4]
-
-            # 插值移动
-            for step in range(steps_per_edge + 1):
-                t = step / steps_per_edge
-                x = int(start[0] + t * (end[0] - start[0]))
-                y = int(start[1] + t * (end[1] - start[1]))
-                self.move_to(x, y)
-                time.sleep(0.003)  # 控制速度
-
-        # 关闭激光
-        self.laser_off()
-        time.sleep(0.01)
-
-    def draw_boxes(self, boxes, delay_between_boxes=0.1):
+    def draw_boxes(self, boxes, image_width=640, image_height=480, delay_between_boxes=0.05):
         """
-        绘制多个边界框
+        绘制多个边界框（批量发送后统一更新）
 
         Args:
             boxes: 边界框列表，每个元素为 [x1, y1, x2, y2]
-            delay_between_boxes: 每个框之间的延迟（秒）
+            image_width: 图像宽度
+            image_height: 图像高度
+            delay_between_boxes: 每个命令之间的延迟（秒）
         """
-        for box in boxes:
-            self.draw_box(box)
+        # 重置任务索引
+        self.task_index = 0
+
+        # 批量发送所有box命令
+        for i, box in enumerate(boxes[:10]):  # STM32最多支持10个任务
+            self.draw_box(box, pixel_coords=True, task_index=i,
+                         image_width=image_width, image_height=image_height)
             time.sleep(delay_between_boxes)
 
+        # 发送更新命令，让STM32开始绘制
+        self.update_tasks()
+        return True
+
     def test_pattern(self):
-        """测试图案：绘制一个中心方框"""
+        """测试图案：绘制一个中心矩形"""
         print("绘制测试图案...")
 
-        # 中心点 (假设摄像头分辨率640x480)
-        center_x, center_y = 320, 240
-        size = 100
+        # 中心矩形（振镜坐标）
+        box = [0, 0, 2000, 2000]  # 中心点(1000, 1000), 宽度2000, 高度2000
 
-        box = [
-            center_x - size,
-            center_y - size,
-            center_x + size,
-            center_y + size
-        ]
-
-        self.draw_box(box, pixel_coords=True)
-        print("✓ 测试图案绘制完成")
+        self.draw_box(box, pixel_coords=False, task_index=0)
+        self.update_tasks()
+        print("✓ 测试图案命令已发送")
 
 
 def main():
     """测试程序"""
     import argparse
 
-    parser = argparse.ArgumentParser(description='激光振镜控制器测试')
+    parser = argparse.ArgumentParser(description='激光振镜控制器测试（STM32文本协议）')
     parser.add_argument('--serial-port', default='/dev/ttyUSB0', help='串口设备')
     parser.add_argument('--baudrate', type=int, default=115200, help='波特率')
-    parser.add_argument('--calibration', required=True, help='标定文件')
+    parser.add_argument('--calibration', help='标定文件（可选）')
     parser.add_argument('--test', action='store_true', help='运行测试图案')
     args = parser.parse_args()
 
@@ -312,13 +243,14 @@ def main():
         if args.test:
             # 测试模式
             controller.test_pattern()
+            time.sleep(2)
         else:
             # 交互模式
-            print("\n命令:")
-            print("  box x1,y1,x2,y2  - 绘制边界框")
-            print("  move x,y         - 移动到位置")
-            print("  laser on/off     - 激光开关")
+            print("\n命令 (STM32文本协议):")
+            print("  box x1,y1,x2,y2  - 绘制边界框（像素坐标）")
+            print("  circle x,y,r     - 绘制圆形")
             print("  test             - 测试图案")
+            print("  update           - 发送更新标志")
             print("  quit             - 退出")
 
             while True:
@@ -328,20 +260,23 @@ def main():
                     break
                 elif cmd == 'test':
                     controller.test_pattern()
+                elif cmd == 'update':
+                    controller.update_tasks()
+                    print("✓ 更新命令已发送")
                 elif cmd.startswith('box'):
                     parts = cmd.split()[1].split(',')
                     if len(parts) == 4:
                         box = [int(p) for p in parts]
-                        controller.draw_box(box)
-                elif cmd.startswith('move'):
+                        controller.draw_box(box, pixel_coords=True)
+                        controller.update_tasks()
+                        print(f"✓ 发送矩形命令: {box}")
+                elif cmd.startswith('circle'):
                     parts = cmd.split()[1].split(',')
-                    if len(parts) == 2:
-                        x, y = int(parts[0]), int(parts[1])
-                        controller.move_to_pixel(x, y)
-                elif cmd == 'laser on':
-                    controller.laser_on()
-                elif cmd == 'laser off':
-                    controller.laser_off()
+                    if len(parts) == 3:
+                        x, y, r = int(parts[0]), int(parts[1]), int(parts[2])
+                        controller.draw_circle(x, y, r)
+                        controller.update_tasks()
+                        print(f"✓ 发送圆形命令: ({x}, {y}), r={r}")
                 else:
                     print("未知命令")
 
