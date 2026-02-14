@@ -59,6 +59,22 @@ runs/
 *.cache
 
 # ------------------------------
+# 根目录本地大资产（不入库）
+# ------------------------------
+/backup_fw_rootfs_20241204/
+/backup_modules_rootfs_20241204/
+/backup_hwhiaiuser_rootfs_20241204/
+/ElectroCom61 A Multiclass Dataset for Detection of Electronic Components/
+/赛题1相关模板/
+
+# 根目录镜像/安装包/压缩包
+/*.img
+/*.img.xz
+/*.run
+/*.rar
+/*.zip
+
+# ------------------------------
 # 规划与调试工作文件
 # ------------------------------
 task_plan.md
