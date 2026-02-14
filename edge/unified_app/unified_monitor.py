@@ -9,11 +9,23 @@ import time
 import json
 import cv2
 import numpy as np
-import acl
-import mediapipe as mp
 import yaml
+import sys
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+try:
+    import mediapipe as mp
+except ModuleNotFoundError:
+    mp = None
+
+try:
+    import acl
+except ModuleNotFoundError:
+    acl = None
+
+# 添加 laser_galvo 路径（基于当前文件位置，避免依赖固定 HOME 路径）
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'laser_galvo'))
 
 class AclLiteResource:
     """ACL 资源管理"""
@@ -231,7 +243,18 @@ def main():
     parser.add_argument('--data-yaml', required=True, help='数据配置 YAML')
     parser.add_argument('--danger-distance', type=int, default=300, help='危险距离 (mm)')
     parser.add_argument('--conf-thres', type=float, default=0.55, help='YOLO 置信度阈值')
+    parser.add_argument('--enable-laser', action='store_true', help='启用激光振镜标记')
+    parser.add_argument('--laser-serial', default='/dev/ttyUSB0', help='激光振镜串口设备')
+    parser.add_argument('--laser-baudrate', type=int, default=115200, help='激光振镜串口波特率')
+    parser.add_argument('--laser-calibration', help='激光校准文件（可选）')
+    parser.add_argument('--laser-target-classes', nargs='+', help='仅激光标记这些类别（可选）')
+    parser.add_argument('--laser-min-score', type=float, default=0.7, help='激光标记最小置信度')
     args = parser.parse_args()
+
+    if acl is None:
+        raise ModuleNotFoundError("未找到 acl 模块，请先安装 Ascend ACL Python 运行时。")
+    if mp is None:
+        raise ModuleNotFoundError("未找到 mediapipe 模块，请先安装 mediapipe。")
 
     print("=" * 60)
     print("统一检测监控 - 物体 + 手部安全")
@@ -258,12 +281,13 @@ def main():
     mp_drawing = mp.solutions.drawing_utils
     mp_drawing_styles = mp.solutions.drawing_styles
     hands = mp_hands.Hands(
-        static_image_mode=False,
+        static_image_mode=False,  # 启用追踪模式
         max_num_hands=2,
+        model_complexity=0,  # 使用轻量级模型
         min_detection_confidence=0.5,
         min_tracking_confidence=0.5
     )
-    print("✓ MediaPipe Hands 已初始化")
+    print("✓ MediaPipe Hands 已初始化 (轻量级追踪模式)")
 
     # 5. 初始化 RealSense D435
     print("\n初始化 RealSense D435...")
@@ -279,11 +303,56 @@ def main():
     config.enable_device(serial)
     config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
     config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
-    pipeline.start(config)
+    profile = pipeline.start(config)
     align = rs.align(rs.stream.color)
-    print(f"✓ RealSense D435 已连接 ({serial})")
 
-    # 6. WebUI 输出
+    # 设置相机参数：启用自动曝光并设置快门速度
+    color_sensor = profile.get_device().first_color_sensor()
+
+    # 先启用自动曝光
+    color_sensor.set_option(rs.option.enable_auto_exposure, 1)
+
+    # 获取曝光值范围
+    exposure_range = color_sensor.get_option_range(rs.option.exposure)
+    target_exposure = 33333  # 1/30s = 33333微秒
+
+    # 限制在相机支持的范围内
+    if target_exposure < exposure_range.min:
+        target_exposure = exposure_range.min
+    elif target_exposure > exposure_range.max:
+        target_exposure = exposure_range.max
+
+    # 先禁用自动曝光，设置固定曝光值，然后重新启用自动曝光作为基准
+    color_sensor.set_option(rs.option.enable_auto_exposure, 0)
+    color_sensor.set_option(rs.option.exposure, target_exposure)
+    time.sleep(0.1)
+    color_sensor.set_option(rs.option.enable_auto_exposure, 1)
+
+    print(f"✓ RealSense D435 已连接 ({serial})")
+    print(f"  曝光范围: {exposure_range.min:.0f}-{exposure_range.max:.0f}μs")
+    print(f"  初始曝光: {target_exposure:.0f}μs (~1/{1000000/target_exposure:.0f}s)")
+    print(f"  自动曝光: 已启用")
+
+    # 6. 初始化激光振镜（可选）
+    galvo = None
+    if args.enable_laser:
+        try:
+            from galvo_controller import LaserGalvoController
+            galvo = LaserGalvoController(
+                serial_port=args.laser_serial,
+                baudrate=args.laser_baudrate,
+                calibration_file=args.laser_calibration
+            )
+            if galvo.connect():
+                print(f"✓ 激光振镜已连接: {args.laser_serial}")
+            else:
+                print("✗ 激光振镜连接失败，继续运行（无激光标记）")
+                galvo = None
+        except Exception as e:
+            print(f"✗ 激光初始化失败: {e}")
+            galvo = None
+
+    # 7. WebUI 输出
     web_dir = Path.home() / 'ICT' / 'webui_http_unified'
     web_dir.mkdir(parents=True, exist_ok=True)
     print(f"\n✓ WebUI 输出: {web_dir}")
@@ -293,10 +362,42 @@ def main():
     last_ts = None
     frame_count = 0
     last_hand_results = None  # 缓存上一次的手部检测结果
+    last_laser_time = 0.0
+    laser_cooldown = 2.0  # 激光打框冷却时间（秒）
+    executor = ThreadPoolExecutor(max_workers=2)
+
+    def run_yolo_inference(frame, h_orig, w_orig):
+        """YOLO推理任务"""
+        t0 = time.time()
+        img_yolo = cv2.resize(frame, (640, 640)).astype(np.uint8)
+        yolo_outputs = yolo_model.execute(img_yolo)
+
+        ratio = min(640 / w_orig, 640 / h_orig)
+        new_w, new_h = int(w_orig * ratio), int(h_orig * ratio)
+        dw, dh = (640 - new_w) / 2, (640 - new_h) / 2
+
+        objects = postprocess_yolo(
+            yolo_outputs[0], ratio, (dw, dh),
+            nc=len(names), conf_thres=args.conf_thres, names=names
+        ) if yolo_outputs else []
+
+        yolo_ms = (time.time() - t0) * 1000
+        return objects, yolo_ms
+
+    def run_hand_detection(frame, should_detect):
+        """手部检测任务"""
+        t1 = time.time()
+        if should_detect:
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            hand_results = hands.process(frame_rgb)
+        else:
+            hand_results = None
+        hand_ms = (time.time() - t1) * 1000
+        return hand_results, hand_ms
 
     try:
         while True:
-            t0 = time.time()
+            t_frame = time.time()
 
             # 读取相机
             frames = pipeline.wait_for_frames()
@@ -309,38 +410,27 @@ def main():
             frame = np.asanyarray(color_frame.get_data())
             h_orig, w_orig = frame.shape[:2]
 
-            # YOLO 推理
-            img_yolo = cv2.resize(frame, (640, 640)).astype(np.uint8)
-            yolo_outputs = yolo_model.execute(img_yolo)
+            # 并行执行YOLO和手部检测
+            should_detect_hand = (frame_count % 3 == 0)
+            yolo_future = executor.submit(run_yolo_inference, frame, h_orig, w_orig)
+            hand_future = executor.submit(run_hand_detection, frame, should_detect_hand)
 
-            ratio = min(640 / w_orig, 640 / h_orig)
-            new_w, new_h = int(w_orig * ratio), int(h_orig * ratio)
-            dw, dh = (640 - new_w) / 2, (640 - new_h) / 2
+            # 等待结果
+            objects, yolo_ms = yolo_future.result()
+            hand_results_new, hand_ms = hand_future.result()
 
-            objects = postprocess_yolo(
-                yolo_outputs[0], ratio, (dw, dh),
-                nc=len(names), conf_thres=args.conf_thres, names=names
-            ) if yolo_outputs else []
+            # 更新手部检测结果
+            if hand_results_new is not None:
+                last_hand_results = hand_results_new
+            hand_results = last_hand_results if last_hand_results else None
 
-            yolo_ms = (time.time() - t0) * 1000
-
-            # MediaPipe 手部检测（每2帧检测一次）
-            t1 = time.time()
-            if True:  # 只在偶数帧检测手部
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                hand_results = hands.process(frame_rgb)
-                last_hand_results = hand_results
-            else:
-                hand_results = last_hand_results
-            hand_ms = (time.time() - t1) * 1000
-
-            # 绘制物体检测
-            for obj in objects:
-                x1, y1, x2, y2 = map(int, obj['box'])
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                label = f"{obj['name']} {obj['score']:.2f}"
-                cv2.putText(frame, label, (x1, y1 - 10),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            # 绘制物体检测（已禁用）
+            # for obj in objects:
+            #     x1, y1, x2, y2 = map(int, obj['box'])
+            #     cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            #     label = f"{obj['name']} {obj['score']:.2f}"
+            #     cv2.putText(frame, label, (x1, y1 - 10),
+            #                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
             # 手部检测和安全检查
             is_danger = False
@@ -351,12 +441,15 @@ def main():
             if hand_results.multi_hand_landmarks:
                 hand_count = len(hand_results.multi_hand_landmarks)
                 for hand_landmarks in hand_results.multi_hand_landmarks:
-                    # 绘制完整21点骨架
-                    mp_drawing.draw_landmarks(
-                        frame, hand_landmarks, mp_hands.HAND_CONNECTIONS,
-                        mp_drawing_styles.get_default_hand_landmarks_style(),
-                        mp_drawing_styles.get_default_hand_connections_style()
-                    )
+                    # 只绘制主要的11个关键点（简化版）
+                    # 0: 手腕, 4,8,12,16,20: 五个指尖, 2,5,9,13,17: 五个指根
+                    key_points = [0, 2, 4, 5, 8, 9, 12, 13, 16, 17, 20]
+                    for idx in key_points:
+                        landmark = hand_landmarks.landmark[idx]
+                        px, py = int(landmark.x * w_orig), int(landmark.y * h_orig)
+                        # 手腕用红色，其他用绿色
+                        color = (0, 0, 255) if idx == 0 else (0, 255, 0)
+                        cv2.circle(frame, (px, py), 5, color, -1)
 
                     # 获取手腕深度
                     wrist = hand_landmarks.landmark[0]
@@ -392,6 +485,47 @@ def main():
                     except:
                         pass
 
+            # 激光振镜标记物体（仅在安全状态下执行）
+            laser_marked = False
+            if galvo and objects and not is_danger:
+                current_time = time.time()
+                if current_time - last_laser_time >= laser_cooldown:
+                    targets = []
+                    for obj in objects:
+                        if obj['score'] < args.laser_min_score:
+                            continue
+                        if args.laser_target_classes and obj['name'] not in args.laser_target_classes:
+                            continue
+                        targets.append(obj)
+
+                    if targets:
+                        galvo.task_index = 0
+                        for idx, obj in enumerate(targets[:3]):  # 限制最多标记3个目标
+                            box = obj['box']
+                            try:
+                                galvo.draw_box(
+                                    box,
+                                    pixel_coords=True,
+                                    task_index=idx,
+                                    image_width=w_orig,
+                                    image_height=h_orig,
+                                    steps_per_edge=15
+                                )
+                                laser_marked = True
+                                time.sleep(0.02)
+                            except Exception as e:
+                                print(
+                                    "[LASER_DRAW_ERROR] "
+                                    f"class={obj.get('name', 'unknown')} "
+                                    f"score={obj.get('score', 0.0):.3f} "
+                                    f"box={box} error={e}"
+                                )
+                                break
+
+                        if laser_marked:
+                            galvo.update_tasks()
+                            last_laser_time = current_time
+
             # 计算 FPS
             now = time.time()
             fps = 1.0 / (now - last_ts) if last_ts else 0.0
@@ -402,10 +536,10 @@ def main():
             if frame_count % 30 == 0:
                 status = "⚠ DANGER" if is_danger else "✓ SAFE"
                 print(f"{status} | FPS: {fps:.1f} | YOLO: {yolo_ms:.1f}ms | Hand: {hand_ms:.1f}ms | "
-                      f"物体: {len(objects)} | 手: {hand_count}")
+                      f"物体: {len(objects)} | 手: {hand_count} | 激光: {'ON' if laser_marked else 'OFF'}")
 
-            # WebUI 更新
-            cv2.imwrite(str(web_dir / 'frame.jpg'), frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            # WebUI 更新（每帧更新，保证流畅显示）
+            cv2.imwrite(str(web_dir / 'frame.jpg'), frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
             state = {
                 'fps': fps,
                 'yolo_ms': yolo_ms,
@@ -413,6 +547,8 @@ def main():
                 'objects': len(objects),
                 'hands': hand_count,
                 'is_danger': is_danger,
+                'laser_enabled': galvo is not None,
+                'laser_marked': laser_marked,
                 'min_depth_mm': min_depth_mm,
                 'danger_object': danger_obj['name'] if danger_obj else None,
                 'ts': now
@@ -423,8 +559,11 @@ def main():
     except KeyboardInterrupt:
         print("\n\n监控已停止")
     finally:
+        executor.shutdown(wait=True)
         hands.close()
         pipeline.stop()
+        if galvo:
+            galvo.disconnect()
         print("✓ 资源已释放")
 
 if __name__ == '__main__':

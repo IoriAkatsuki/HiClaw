@@ -39,7 +39,7 @@
    - DAC8563控制接口
    - 激光开关控制
 
-5. **unified_monitor_with_laser.py** - 完整集成
+5. **../unified_app/unified_monitor.py** - 统一主入口（含激光参数）
    - YOLO物体检测
    - MediaPipe手部安全检测
    - 激光自动标注（避开危险情况）
@@ -196,20 +196,21 @@ python3 calibrate_galvo.py \
 cd /home/oasis/Documents/ICT/edge/unified_app
 
 # 基本运行（不启用激光）
-python3 unified_monitor_with_laser.py \
+python3 unified_monitor.py \
     --yolo-model ../models/yolov8n_electro61.om \
     --data-yaml ../data/electro61.yaml \
     --danger-distance 300 \
     --conf-thres 0.55
 
 # 启用激光标注
-python3 unified_monitor_with_laser.py \
+python3 unified_monitor.py \
     --yolo-model ../models/yolov8n_electro61.om \
     --data-yaml ../data/electro61.yaml \
     --danger-distance 300 \
     --conf-thres 0.55 \
     --enable-laser \
     --laser-serial /dev/ttyUSB0 \
+    --laser-baudrate 115200 \
     --laser-calibration ../laser_galvo/galvo_calibration.yaml \
     --laser-min-score 0.7 \
     --laser-target-classes capacitor resistor IC
@@ -218,6 +219,7 @@ python3 unified_monitor_with_laser.py \
 **参数说明:**
 - `--enable-laser`: 启用激光打框功能
 - `--laser-serial`: 串口设备路径
+- `--laser-baudrate`: 串口波特率（默认 115200）
 - `--laser-calibration`: 标定文件路径
 - `--laser-min-score`: 只标注置信度高于此值的物体
 - `--laser-target-classes`: 指定要标注的类别（可选，不指定则标注所有）
@@ -386,8 +388,11 @@ if depth_mm < 100:  # 仅在10cm以内禁用激光
    - 减少检测频率: 每3帧检测一次
 
 2. **加快激光绘制:**
-   - 减少插值步数: `steps_per_edge=10`
-   - 提高串口波特率: `baudrate=921600`
+   - 提高串口波特率: `--laser-baudrate 921600`
+   - 减少单次标注数量（默认最多3个）
+
+> 说明：`draw_box(..., steps_per_edge=...)` 仅为兼容旧调用保留参数，
+> 当前 STM32 文本协议不会按该参数进行插值绘制。
 
 3. **多物体处理:**
    - 限制标注数量: `max_targets=3`

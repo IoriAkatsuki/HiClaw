@@ -89,12 +89,20 @@ class LaserGalvoController:
             x_galvo = int(np.clip(galvo_pt[0][0][0], -32768, 32767))
             y_galvo = int(np.clip(galvo_pt[0][0][1], -32768, 32767))
         else:
-            # 简单线性映射：像素坐标 -> 振镜坐标
-            # 中心为(0,0)，范围-32768到32767
-            x_galvo = int((x_pixel - image_width/2) * (65535 / image_width))
-            y_galvo = int((y_pixel - image_height/2) * (65535 / image_height))
-            x_galvo = np.clip(x_galvo, -32768, 32767)
-            y_galvo = np.clip(y_galvo, -32768, 32767)
+            # 使用用户提供的映射系数
+            # 像素中心对应振镜(0, 0)
+            # X方向：1像素 = 102.4 单位
+            # Y方向：1像素 = 136.5 单位
+            # 注意：左上角为正正，右下角为负负（坐标系反转）
+            center_x = image_width / 2.0  # 320
+            center_y = image_height / 2.0  # 240
+
+            x_galvo = int((center_x - x_pixel) * 102.4)  # 反转X
+            y_galvo = int((center_y - y_pixel) * 136.5)  # 反转Y
+
+            # 限制在int16_t范围内
+            x_galvo = int(np.clip(x_galvo, -32768, 32767))
+            y_galvo = int(np.clip(y_galvo, -32768, 32767))
 
         return (x_galvo, y_galvo)
 
@@ -106,12 +114,14 @@ class LaserGalvoController:
             command_str: 命令字符串（如 "R0 1000,2000,3000,4000"）
         """
         if self.ser is None or not self.ser.is_open:
+            print(f"[GALVO] 串口未打开")
             return False
 
         try:
             # 发送命令（添加换行符）
             cmd_bytes = (command_str + '\n').encode('utf-8')
             self.ser.write(cmd_bytes)
+            print(f"[GALVO] → {command_str}")  # 调试输出
             time.sleep(0.005)  # 短暂延迟确保STM32处理
             return True
         except Exception as e:
@@ -136,10 +146,18 @@ class LaserGalvoController:
             task_index = self.task_index
             self.task_index = (self.task_index + 1) % 10
 
-        cmd = f"C{task_index} {x_galvo},{y_galvo},{radius}"
+        cmd = f"C{task_index}{x_galvo},{y_galvo},{radius}"
         return self._send_text_command(cmd)
 
-    def draw_box(self, box, pixel_coords=True, task_index=None, image_width=640, image_height=480):
+    def draw_box(
+        self,
+        box,
+        pixel_coords=True,
+        task_index=None,
+        image_width=640,
+        image_height=480,
+        steps_per_edge=None
+    ):
         """
         绘制矩形边界框（发送R命令到STM32）
 
@@ -149,7 +167,10 @@ class LaserGalvoController:
             task_index: 任务索引（0-9），默认自动递增
             image_width: 图像宽度（用于像素转换）
             image_height: 图像高度（用于像素转换）
+            steps_per_edge: 兼容参数，当前STM32文本协议不使用该参数
         """
+        # 向后兼容旧调用方：当前协议仅支持矩形参数，不支持插值步数控制。
+        _ = steps_per_edge
         x1, y1, x2, y2 = box
 
         if pixel_coords:
@@ -164,9 +185,9 @@ class LaserGalvoController:
                 center_x_pixel, center_y_pixel, image_width, image_height
             )
 
-            # 计算振镜坐标系中的宽度和高度（简单比例缩放）
-            width_galvo = int(width_pixel * (65535 / image_width))
-            height_galvo = int(height_pixel * (65535 / image_height))
+            # 计算振镜坐标系中的宽度和高度（使用映射系数）
+            width_galvo = int(width_pixel * 102.4)
+            height_galvo = int(height_pixel * 136.5)
         else:
             # 已经是振镜坐标
             center_x_galvo = int((x1 + x2) / 2)
@@ -179,7 +200,7 @@ class LaserGalvoController:
             task_index = self.task_index
             self.task_index = (self.task_index + 1) % 10
 
-        cmd = f"R{task_index} {center_x_galvo},{center_y_galvo},{width_galvo},{height_galvo}"
+        cmd = f"R{task_index}{center_x_galvo},{center_y_galvo},{width_galvo},{height_galvo}"
         return self._send_text_command(cmd)
 
     def draw_boxes(self, boxes, image_width=640, image_height=480, delay_between_boxes=0.05):
