@@ -1,0 +1,84 @@
+# ------------------------------
+# Python / 通用缓存
+# ------------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.class
+*.so
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# ------------------------------
+# 日志 / 临时文件
+# ------------------------------
+*.log
+nohup.out
+*.tmp
+*.temp
+*.bak
+
+# ------------------------------
+# IDE / 系统文件
+# ------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ------------------------------
+# 构建与打包产物
+# ------------------------------
+build/
+dist/
+*.egg-info/
+
+# ------------------------------
+# 运行时输出（WebUI）
+# ------------------------------
+webui_http*/frame.jpg
+webui_http*/state.json
+edge/laser_galvo/galvo_calibration.yaml
+edge/laser_galvo/calibration_diagnostic*.json
+
+# ------------------------------
+# 训练/推理产物与大模型文件
+# ------------------------------
+runs/
+*.om
+*.onnx
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# 数据集缓存
+*.cache
+
+# ------------------------------
+# 根目录本地大资产（不入库）
+# ------------------------------
+/backup_fw_rootfs_20241204/
+/backup_modules_rootfs_20241204/
+/backup_hwhiaiuser_rootfs_20241204/
+/ElectroCom61 A Multiclass Dataset for Detection of Electronic Components/
+/赛题1相关模板/
+
+# 根目录镜像/安装包/压缩包
+/*.img
+/*.img.xz
+/*.run
+/*.rar
+/*.zip
+
+# ------------------------------
+# 规划与调试工作文件
+# ------------------------------
+task_plan.md
+findings.md
+progress.md

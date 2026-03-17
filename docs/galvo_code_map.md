@@ -1,0 +1,106 @@
+# 振镜工作代码总览
+
+本文档用于快速区分仓库中的振镜相关“上位机代码”和“单片机板卡驱动代码”，避免继续把示例、补丁、运行时输出混成一团。
+
+## 1. 上位机代码（Ascend 板卡 / Linux 主机）
+
+这部分负责视觉检测、标定、串口协议生成和调度。
+
+### 核心目录
+
+- `edge/laser_galvo/galvo_controller.py`
+  - 上位机振镜控制器
+  - 负责像素坐标到振镜坐标转换
+  - 负责发送 `R/C/U` 绘图命令
+- `edge/laser_galvo/calibrate_galvo.py`
+  - 标定核心实现
+  - 负责发送 `G/L` 命令、检测激光点、拟合单应矩阵、输出 YAML
+- `edge/laser_galvo/auto_calibrate.py`
+  - 自动化校准封装
+  - 负责串口探测、重试策略、诊断文件输出
+- `edge/laser_galvo/run_calibration.sh`
+  - 一键校准脚本
+- `edge/unified_app/unified_monitor.py`
+  - 统一检测入口
+  - 在目标检测和安全监测基础上调用 `LaserGalvoController`
+
+### 上位机验证脚本
+
+- `tests/test_galvo_controller_compat.py`
+  - 校验控制器对旧调用参数的兼容性
+- `tests/test_calibration_quality.py`
+  - 校验标定器的稳健聚合、质量门限和单应矩阵计算
+- `tests/board_test_protocol.py`
+  - 板级人工验证串口协议
+- `tests/board_test_dac_range.py`
+  - 板级人工扫描振镜物理范围
+- `tests/board_test_visual_verify.py`
+  - 板级人工验证激光点位响应
+
+## 2. 单片机板卡驱动代码（STM32F401 + DAC8563）
+
+这部分负责串口收命令、驱动 DAC、控制激光开关和执行轨迹。
+
+### 正式工作代码
+
+- `mirror/stm32f401ccu6_dac8563/Core/Src/main.c`
+  - 当前正式协议入口
+  - 已支持 `U/C/R/G/L` 命令
+- `mirror/stm32f401ccu6_dac8563/HARDWARE/dac8563/dac8563.c`
+  - DAC8563 底层驱动
+- `mirror/stm32f401ccu6_dac8563/HARDWARE/dac8563/dac8563.h`
+  - DAC8563 驱动头文件
+- `mirror/stm32f401ccu6_dac8563/Core/Src/spi.c`
+  - SPI 初始化
+- `mirror/stm32f401ccu6_dac8563/Core/Src/usart.c`
+  - 串口初始化
+- `mirror/stm32f401ccu6_dac8563/Core/Src/gpio.c`
+  - DAC 和激光相关 GPIO 初始化
+
+### 补丁/参考文件
+
+- `mirror/stm32_firmware_patch.c`
+  - 历史补丁参考
+  - 当前关键逻辑已经并入 `Core/Src/main.c`
+- `edge/laser_galvo/stm32_galvo_protocol.c`
+  - 独立协议示例
+  - 属于早期二进制协议参考，不是当前正式工作链路
+
+## 3. 当前正式工作链路
+
+### 标定链路
+
+1. 上位机运行 `auto_calibrate.py` / `calibrate_galvo.py`
+2. 上位机向 STM32 发送 `G<x>,<y>` 和 `L0/L1`
+3. STM32 立即移动振镜并切换激光
+4. 上位机通过相机检测激光光斑位置
+5. 上位机计算 `像素 -> 振镜` 的单应矩阵并保存 YAML
+
+### 正常绘制链路
+
+1. `unified_monitor.py` 检测目标框
+2. `galvo_controller.py` 将像素框转换为振镜坐标
+3. 上位机批量发送 `R/C/U`
+4. STM32 在任务缓冲区执行绘制
+
+## 4. 修改入口建议
+
+### 如果你要改上位机行为
+
+- 改坐标转换：`edge/laser_galvo/galvo_controller.py`
+- 改标定算法：`edge/laser_galvo/calibrate_galvo.py`
+- 改自动校准流程：`edge/laser_galvo/auto_calibrate.py`
+- 改检测后联动：`edge/unified_app/unified_monitor.py`
+
+### 如果你要改板卡协议或驱动
+
+- 改串口命令解析：`mirror/stm32f401ccu6_dac8563/Core/Src/main.c`
+- 改 DAC 输出逻辑：`mirror/stm32f401ccu6_dac8563/HARDWARE/dac8563/dac8563.c`
+- 改引脚定义：`mirror/stm32f401ccu6_dac8563/Core/Src/gpio.c`
+
+## 5. 本次整理后的约定
+
+- `edge/laser_galvo/galvo_calibration.yaml` 属于运行时生成物，不再作为仓库源码提交
+- `edge/laser_galvo/calibration_diagnostic*.json` 属于诊断输出，不作为源码提交
+- 固件正式工作版本以 `mirror/stm32f401ccu6_dac8563/` 为准
+- 上位机正式工作版本以 `edge/laser_galvo/` + `edge/unified_app/` 为准
