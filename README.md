@@ -9,6 +9,15 @@
 - **Route B**: 手部安全监控（YOLOv8-Pose / MediaPipe）
 - **Unified App**: 统一检测系统（物体检测 + 手部安全 + 激光标注）
 
+## 振镜代码分层
+
+当前仓库已经将振镜工作代码明确分为两层：
+
+- **上位机代码**：`edge/laser_galvo/`、`edge/unified_app/`
+- **单片机板卡驱动**：`mirror/stm32f401ccu6_dac8563/`
+
+建议先阅读 `docs/galvo_code_map.md`，再进入具体目录修改。
+
 ## 目录结构
 
 ```
@@ -20,7 +29,7 @@ ICT/
 ├── training/                  # 训练端
 │   └── route_a_electro/      # 电子元器件模型训练
 │
-├── edge/                      # 端侧推理
+├── edge/                      # 上位机 / 端侧推理
 │   ├── common/               # 通用模块（相机、振镜控制）
 │   ├── route_a_app/          # 电子元器件分拣应用
 │   ├── route_b_app/          # 手部安全监控应用
@@ -38,7 +47,11 @@ ICT/
 │   ├── calibration_tool/     # 相机-振镜映射标定
 │   └── capture_tool/         # 数据采集工具
 │
-├── calibration_data/          # 标定数据
+├── mirror/                    # 单片机 / 板卡驱动
+│   ├── stm32f401ccu6_dac8563/ # STM32F401 + DAC8563 正式固件
+│   └── stm32_firmware_patch.c # 历史补丁参考（关键逻辑已合入 main.c）
+│
+├── calibration_data/          # 标定板与辅助图
 │   ├── laser_calibration_board_A4.png     # 激光标定板
 │   ├── laser_calibration_board_A4_coordinates.txt
 │   └── checkerboard_calibration_A4.png    # 棋盘格标定板
@@ -110,20 +123,19 @@ python hand_safety_monitor_mediapipe.py \
 ```bash
 cd edge/laser_galvo
 
-# 1. 生成标定板
+# 1. 生成标定板（首次使用）
 python3 generate_calibration_target.py
-# 打印输出的 laser_calibration_board_A4.png
 
-# 2. 连接硬件并执行自动标定
-python3 calibrate_galvo.py \
-    --serial-port /dev/ttyUSB0 \
-    --baudrate 115200 \
-    --output galvo_calibration.yaml
+# 2. 连接硬件并执行自动标定（推荐）
+./run_calibration.sh
+
+# 或手动运行
+python3 auto_calibrate.py --serial-port /dev/ttyUSB0
 
 # 3. 测试标定精度
 python3 calibrate_galvo.py \
     --test \
-    --load galvo_calibration.yaml
+    --load ~/ICT/galvo_calibration.yaml
 ```
 
 **第二步：运行完整系统**
@@ -139,7 +151,7 @@ python3 unified_monitor.py \
     --conf-thres 0.55
 
 # 启用激光标注
-python3 unified_monitor_with_laser.py \
+python3 unified_monitor.py \
     --yolo-model ../models/yolov8n_electro61.om \
     --data-yaml ../data/electro61.yaml \
     --danger-distance 300 \
@@ -186,19 +198,15 @@ cd edge/laser_galvo
 
 ### 串口协议
 
-10字节帧格式：
-```
-[0xAA][0x55][CMD][X_H][X_L][Y_H][Y_L][PARAM][CRC_H][CRC_L]
-```
+当前正式工作链路使用 **STM32 文本协议**：
 
-命令定义：
-- `0x01` MOVE: 移动到指定位置
-- `0x02` LASER_ON: 打开激光
-- `0x03` LASER_OFF: 关闭激光
-- `0x04` DRAW_LINE: 绘制直线
-- `0x05` DRAW_BOX: 绘制矩形
+- `R<i><x>,<y>,<w>,<h>\n`：矩形任务
+- `C<i><x>,<y>,<r>\n`：圆形任务
+- `U\n`：提交任务缓冲区
+- `G<x>,<y>\n`：立即移动（标定）
+- `L0\n` / `L1\n`：激光关/开（标定）
 
-详细协议说明见 `edge/laser_galvo/README.md`
+其中 `mirror/stm32f401ccu6_dac8563/Core/Src/main.c` 是当前正式实现；`edge/laser_galvo/stm32_galvo_protocol.c` 仅保留为早期二进制协议示例。
 
 ### 安全特性
 
@@ -232,12 +240,12 @@ cd edge/laser_galvo
 
 如需在STM32上使用激光振镜控制：
 
-1. 将 `edge/laser_galvo/stm32_galvo_protocol.c` 添加到项目
-2. 在 `main.c` 中调用 `galvo_protocol_init()`
-3. 配置串口（115200, 8N1）
-4. 调整引脚定义匹配实际硬件
+1. 正式固件目录位于 `mirror/stm32f401ccu6_dac8563/`
+2. 串口协议入口位于 `Core/Src/main.c`
+3. DAC 驱动位于 `HARDWARE/dac8563/`
+4. 当前代码已支持 `U/C/R/G/L` 命令
 
-详细说明见 `edge/laser_galvo/stm32_galvo_protocol.c` 注释
+详细分层说明见 `docs/galvo_code_map.md`
 
 ## 常见问题
 

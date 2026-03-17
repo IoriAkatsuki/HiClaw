@@ -192,7 +192,29 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
       task_buf_1[i].params[0] = length;
       task_buf_1[i].params[1] = height;
     }
-    
+
+    // G 命令：立即移动到指定位置（标定模式使用）
+    if (uart1_rx_buf[0] == 'G')
+    {
+      int16_t x;
+      int16_t y;
+      sscanf((const char *)&uart1_rx_buf[1], "%hd,%hd", &x, &y);
+      dac8563_output_int16(x, y);
+    }
+
+    // L 命令：激光开关（标定模式使用）
+    if (uart1_rx_buf[0] == 'L')
+    {
+      if (uart1_rx_buf[1] == '1')
+      {
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_SET);
+      }
+      else if (uart1_rx_buf[1] == '0')
+      {
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET);
+      }
+    }
+
     HAL_UARTEx_ReceiveToIdle_DMA(huart, uart1_rx_buf, BUF_SIZE);
   }
 

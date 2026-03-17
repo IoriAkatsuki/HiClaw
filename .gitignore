@@ -43,6 +43,8 @@ dist/
 # ------------------------------
 webui_http*/frame.jpg
 webui_http*/state.json
+edge/laser_galvo/galvo_calibration.yaml
+edge/laser_galvo/calibration_diagnostic*.json
 
 # ------------------------------
 # 训练/推理产物与大模型文件

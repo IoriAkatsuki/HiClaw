@@ -222,6 +222,32 @@ def postprocess_yolo(pred_flat, ratio, dwdh, nc=61, conf_thres=0.55, iou_thres=0
 
     return dets
 
+def postprocess_yolov10(pred_flat, img_shape, conf_thres=0.55, names=None):
+    """YOLOv10 后处理（模型已内置 NMS，输出 [1, 300, 6]）"""
+    pred = pred_flat.reshape(-1, 6)  # (300, 6): x1,y1,x2,y2,score,cls_id
+    scores = pred[:, 4]
+    mask = scores >= conf_thres
+    pred = pred[mask]
+    if len(pred) == 0:
+        return []
+
+    h_orig, w_orig = img_shape[:2]
+    scale_x, scale_y = w_orig / 640.0, h_orig / 640.0
+
+    dets = []
+    for row in pred:
+        x1, y1, x2, y2, score, cls_id = row
+        cls_id = int(cls_id)
+        cls_name = names[cls_id] if names and cls_id < len(names) else f"Class-{cls_id}"
+        dets.append({
+            'box': [x1 * scale_x, y1 * scale_y, x2 * scale_x, y2 * scale_y],
+            'score': float(score),
+            'cls': cls_id,
+            'name': cls_name
+        })
+    return dets
+
+
 def check_hand_near_objects(wrist_pos, depth_mm, objects, danger_distance=300):
     """检查手是否接近物体"""
     if depth_mm is None or depth_mm <= 0:
@@ -367,19 +393,27 @@ def main():
     executor = ThreadPoolExecutor(max_workers=2)
 
     def run_yolo_inference(frame, h_orig, w_orig):
-        """YOLO推理任务"""
+        """YOLO推理任务（自动适配 YOLOv8/v10 输出格式）"""
         t0 = time.time()
         img_yolo = cv2.resize(frame, (640, 640)).astype(np.uint8)
         yolo_outputs = yolo_model.execute(img_yolo)
 
-        ratio = min(640 / w_orig, 640 / h_orig)
-        new_w, new_h = int(w_orig * ratio), int(h_orig * ratio)
-        dw, dh = (640 - new_w) / 2, (640 - new_h) / 2
-
-        objects = postprocess_yolo(
-            yolo_outputs[0], ratio, (dw, dh),
-            nc=len(names), conf_thres=args.conf_thres, names=names
-        ) if yolo_outputs else []
+        objects = []
+        if yolo_outputs:
+            total = yolo_outputs[0].size
+            if total == 300 * 6 or (total % 300 == 0 and total // 300 <= 7):
+                objects = postprocess_yolov10(
+                    yolo_outputs[0], frame.shape,
+                    conf_thres=args.conf_thres, names=names
+                )
+            else:
+                ratio = min(640 / w_orig, 640 / h_orig)
+                dw = (640 - int(w_orig * ratio)) / 2
+                dh = (640 - int(h_orig * ratio)) / 2
+                objects = postprocess_yolo(
+                    yolo_outputs[0], ratio, (dw, dh),
+                    nc=len(names), conf_thres=args.conf_thres, names=names
+                )
 
         yolo_ms = (time.time() - t0) * 1000
         return objects, yolo_ms
