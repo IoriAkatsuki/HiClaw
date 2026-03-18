@@ -19,10 +19,12 @@ WEBUI_PORT=8002
 WEBUI_DIR="$HOME/ICT/webui_http_unified"
 
 # 默认参数
-YOLO_MODEL="$ICT_DIR/runs/detect/train_electro61/weights/yolov8_electro61_aipp.om"
-DATA_YAML="$ICT_DIR/config/electro61.yaml"
+YOLO_MODEL="$ICT_DIR/models/route_a_yolo26/yolo26n_aug_full_8419_gpu.om"
+POSE_MODEL="${POSE_MODEL:-$ICT_DIR/yolov8n_pose_aipp.om}"
+DATA_YAML="$ICT_DIR/config/yolo26_6cls.yaml"
 DANGER_DISTANCE=300
 CONF_THRES=0.6
+YOLO_DEVICE="cpu"
 
 # 创建必要目录
 mkdir -p "$LOG_DIR" "$PID_DIR" "$WEBUI_DIR"
@@ -78,309 +80,8 @@ start_webui() {
     fi
     
     echo -e "${BLUE}启动 WebUI 服务器...${NC}"
-    
-    # 创建WebUI服务器脚本
-    cat > "$ICT_DIR/edge/unified_app/webui_server.py" << 'PYEOF'
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""WebUI HTTP服务器 - 统一检测"""
-import http.server
-import socketserver
-import os
-from pathlib import Path
 
-PORT = 8002
-WEBUI_DIR = Path.home() / 'ICT' / 'webui_http_unified'
-WEBUI_DIR.mkdir(parents=True, exist_ok=True)
-
-os.chdir(WEBUI_DIR)
-
-# 创建默认HTML
-html_file = WEBUI_DIR / 'index.html'
-if not html_file.exists():
-    with open(html_file, 'w') as f:
-        f.write('''<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>智能激光视觉分拣系统</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: "Segoe UI", Arial, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            padding: 20px;
-        }
-        .container {
-            max-width: 1400px;
-            width: 100%;
-            background: white;
-            border-radius: 20px;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-            overflow: hidden;
-        }
-        .header {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 30px;
-            text-align: center;
-        }
-        .header h1 {
-            font-size: 2.5em;
-            margin-bottom: 10px;
-            text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
-        }
-        .header p {
-            font-size: 1.2em;
-            opacity: 0.9;
-        }
-        .status-bar {
-            display: flex;
-            justify-content: space-around;
-            padding: 20px;
-            background: #f8f9fa;
-            border-bottom: 2px solid #e9ecef;
-        }
-        .stat-item {
-            text-align: center;
-            padding: 15px;
-            background: white;
-            border-radius: 10px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            min-width: 150px;
-        }
-        .stat-value {
-            font-size: 2em;
-            font-weight: bold;
-            color: #667eea;
-            margin: 5px 0;
-        }
-        .stat-label {
-            color: #6c757d;
-            font-size: 0.9em;
-        }
-        .main-content {
-            display: grid;
-            grid-template-columns: 2fr 1fr;
-            gap: 20px;
-            padding: 20px;
-        }
-        .video-panel {
-            position: relative;
-        }
-        .video-frame {
-            width: 100%;
-            border-radius: 15px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
-        }
-        .info-panel {
-            display: flex;
-            flex-direction: column;
-            gap: 15px;
-        }
-        .info-card {
-            background: white;
-            padding: 20px;
-            border-radius: 15px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            border-left: 4px solid #667eea;
-        }
-        .info-card h3 {
-            color: #667eea;
-            margin-bottom: 15px;
-            font-size: 1.3em;
-        }
-        .info-row {
-            display: flex;
-            justify-content: space-between;
-            padding: 10px 0;
-            border-bottom: 1px solid #e9ecef;
-        }
-        .info-row:last-child {
-            border-bottom: none;
-        }
-        .info-label {
-            color: #6c757d;
-            font-weight: 500;
-        }
-        .info-value {
-            font-weight: bold;
-            color: #495057;
-        }
-        .danger {
-            color: #dc3545 !important;
-            animation: pulse 1s infinite;
-        }
-        .safe {
-            color: #28a745 !important;
-        }
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
-        }
-        .loading {
-            text-align: center;
-            padding: 40px;
-            color: #6c757d;
-        }
-        @media (max-width: 1024px) {
-            .main-content {
-                grid-template-columns: 1fr;
-            }
-            .status-bar {
-                flex-wrap: wrap;
-            }
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>🎯 智能激光视觉分拣系统</h1>
-            <p>基于Ascend AI的实时物体检测与安全监控</p>
-        </div>
-        
-        <div class="status-bar">
-            <div class="stat-item">
-                <div class="stat-label">系统状态</div>
-                <div class="stat-value" id="systemStatus">--</div>
-            </div>
-            <div class="stat-item">
-                <div class="stat-label">帧率 (FPS)</div>
-                <div class="stat-value" id="fps">--</div>
-            </div>
-            <div class="stat-item">
-                <div class="stat-label">检测物体</div>
-                <div class="stat-value" id="objects">--</div>
-            </div>
-            <div class="stat-item">
-                <div class="stat-label">手部检测</div>
-                <div class="stat-value" id="hands">--</div>
-            </div>
-        </div>
-        
-        <div class="main-content">
-            <div class="video-panel">
-                <img id="videoFrame" class="video-frame" src="frame.jpg" alt="视频流">
-            </div>
-            
-            <div class="info-panel">
-                <div class="info-card">
-                    <h3>⚡ 性能指标</h3>
-                    <div class="info-row">
-                        <span class="info-label">YOLO推理</span>
-                        <span class="info-value" id="yoloMs">-- ms</span>
-                    </div>
-                    <div class="info-row">
-                        <span class="info-label">手部检测</span>
-                        <span class="info-value" id="handMs">-- ms</span>
-                    </div>
-                    <div class="info-row">
-                        <span class="info-label">总帧率</span>
-                        <span class="info-value" id="totalFps">-- FPS</span>
-                    </div>
-                </div>
-                
-                <div class="info-card">
-                    <h3>🛡️ 安全监控</h3>
-                    <div class="info-row">
-                        <span class="info-label">安全状态</span>
-                        <span class="info-value" id="safetyStatus">--</span>
-                    </div>
-                    <div class="info-row">
-                        <span class="info-label">最小距离</span>
-                        <span class="info-value" id="minDepth">-- mm</span>
-                    </div>
-                    <div class="info-row">
-                        <span class="info-label">危险物体</span>
-                        <span class="info-value" id="dangerObj">--</span>
-                    </div>
-                </div>
-                
-                <div class="info-card">
-                    <h3>ℹ️ 系统信息</h3>
-                    <div class="info-row">
-                        <span class="info-label">检测类别</span>
-                        <span class="info-value">61类元器件</span>
-                    </div>
-                    <div class="info-row">
-                        <span class="info-label">分辨率</span>
-                        <span class="info-value">640 x 480</span>
-                    </div>
-                    <div class="info-row">
-                        <span class="info-label">危险阈值</span>
-                        <span class="info-value">300 mm</span>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <script>
-        function updateData() {
-            fetch('state.json')
-                .then(response => response.json())
-                .then(data => {
-                    // 更新状态栏
-                    document.getElementById('systemStatus').textContent = data.is_danger ? '⚠️ 危险' : '✅ 安全';
-                    document.getElementById('systemStatus').className = 'stat-value ' + (data.is_danger ? 'danger' : 'safe');
-                    
-                    document.getElementById('fps').textContent = (data.fps || 0).toFixed(1);
-                    document.getElementById('objects').textContent = data.objects || 0;
-                    document.getElementById('hands').textContent = data.hands || 0;
-                    
-                    // 更新性能指标
-                    document.getElementById('yoloMs').textContent = (data.yolo_ms || 0).toFixed(1) + ' ms';
-                    document.getElementById('handMs').textContent = (data.hand_ms || 0).toFixed(1) + ' ms';
-                    document.getElementById('totalFps').textContent = (data.fps || 0).toFixed(1) + ' FPS';
-                    
-                    // 更新安全信息
-                    const safetyEl = document.getElementById('safetyStatus');
-                    if (data.is_danger) {
-                        safetyEl.textContent = '⚠️ 危险';
-                        safetyEl.className = 'info-value danger';
-                    } else {
-                        safetyEl.textContent = '✅ 安全';
-                        safetyEl.className = 'info-value safe';
-                    }
-                    
-                    document.getElementById('minDepth').textContent = data.min_depth_mm ? 
-                        data.min_depth_mm.toFixed(0) + ' mm' : '--';
-                    document.getElementById('dangerObj').textContent = data.danger_object || '无';
-                    
-                    // 更新视频帧
-                    document.getElementById('videoFrame').src = 'frame.jpg?t=' + new Date().getTime();
-                })
-                .catch(err => console.error('更新失败:', err));
-        }
-        
-        // 初始加载
-        updateData();
-        // 每500ms更新一次
-        setInterval(updateData, 500);
-    </script>
-</body>
-</html>''')
-
-# 启动HTTP服务器
-class ReusableTCPServer(socketserver.TCPServer):
-    allow_reuse_address = True
-
-Handler = http.server.SimpleHTTPRequestHandler
-with ReusableTCPServer(("0.0.0.0", PORT), Handler) as httpd:
-    print(f"WebUI服务器运行在端口 {PORT}")
-    print(f"访问: http://ict.local:{PORT}")
-    httpd.serve_forever()
-PYEOF
-    
-    chmod +x "$ICT_DIR/edge/unified_app/webui_server.py"
-    
-    # 启动WebUI服务器
+    # 启动仓库内正式 WebUI 服务器
     cd "$ICT_DIR/edge/unified_app"
     nohup /usr/bin/python3 webui_server.py > "$LOG_DIR/webui.log" 2>&1 &
     echo $! > "$pid_file"
@@ -415,19 +116,31 @@ start_detection() {
     # 检查模型文件
     if [ ! -f "$YOLO_MODEL" ]; then
         echo -e "${RED}✗ 模型文件不存在: $YOLO_MODEL${NC}"
-        echo -e "${YELLOW}  请先转换模型或指定正确的模型路径${NC}"
+        echo -e "${YELLOW}  请先运行: $ICT_DIR/tools/export_latest_yolo26_to_om.sh${NC}"
         return 1
     fi
     
     # 启动检测程序
     cd "$ICT_DIR/edge/unified_app"
     export PYTHONPATH=$HOME/.local/lib/python3.10/site-packages:$PYTHONPATH
-    nohup /usr/bin/python3 unified_monitor.py \
-        --yolo-model "$YOLO_MODEL" \
-        --data-yaml "$DATA_YAML" \
-        --danger-distance "$DANGER_DISTANCE" \
-        --conf-thres "$CONF_THRES" \
-        > "$LOG_DIR/detection.log" 2>&1 &
+    if [ -f "$POSE_MODEL" ]; then
+        nohup /usr/bin/python3 unified_monitor_mp.py \
+            --yolo-model "$YOLO_MODEL" \
+            --yolo-device "$YOLO_DEVICE" \
+            --pose-model "$POSE_MODEL" \
+            --data-yaml "$DATA_YAML" \
+            --danger-distance "$DANGER_DISTANCE" \
+            --conf-thres "$CONF_THRES" \
+            > "$LOG_DIR/detection.log" 2>&1 &
+    else
+        nohup /usr/bin/python3 unified_monitor_mp.py \
+            --yolo-model "$YOLO_MODEL" \
+            --yolo-device "$YOLO_DEVICE" \
+            --data-yaml "$DATA_YAML" \
+            --danger-distance "$DANGER_DISTANCE" \
+            --conf-thres "$CONF_THRES" \
+            > "$LOG_DIR/detection.log" 2>&1 &
+    fi
     echo $! > "$pid_file"
     
     sleep 3

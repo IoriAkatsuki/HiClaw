@@ -9,6 +9,12 @@
 - **Route B**: 手部安全监控（YOLOv8-Pose / MediaPipe）
 - **Unified App**: 统一检测系统（物体检测 + 手部安全 + 激光标注）
 
+当前正式部署主线说明：
+- **训练源模型**：`2026_3_12/runs/train/yolo26n_aug_full_8419_gpu/weights/best.pt`
+- **正式部署模型**：`models/route_a_yolo26/yolo26n_aug_full_8419_gpu.om`
+- **正式运行配置**：`config/yolo26_6cls.yaml`
+- **注意**：项目默认部署到华为 Ascend 310B，正式启动默认走 `OM`；`.pt/.onnx` 仅作为显式备用输入格式
+
 ## 振镜代码分层
 
 当前仓库已经将振镜工作代码明确分为两层：
@@ -26,8 +32,12 @@ ICT/
 │   ├── route-a-design.md     # 电子元器件路线设计
 │   └── route-b-design.md     # 手部安全监控设计
 │
-├── training/                  # 训练端
-│   └── route_a_electro/      # 电子元器件模型训练
+├── training/                  # 历史训练脚本
+│   └── route_a_electro/      # 旧版电子元器件训练链路
+│
+├── 2026_3_12/                 # 最新 yolo26 训练工作区
+│   ├── train_yolo26n_gpu.py
+│   └── yolo_dataset/
 │
 ├── edge/                      # 上位机 / 端侧推理
 │   ├── common/               # 通用模块（相机、振镜控制）
@@ -56,8 +66,8 @@ ICT/
 │   ├── laser_calibration_board_A4_coordinates.txt
 │   └── checkerboard_calibration_A4.png    # 棋盘格标定板
 │
-└── models/                    # 转换后的模型文件
-    ├── yolov8n_electro61.om  # 电子元器件检测
+└── models/                    # 转换后的部署模型文件
+    ├── route_a_yolo26/       # 最新 yolo26 导出的 onnx / om（运行时生成）
     └── yolov8n_pose_aipp.om  # 人体姿态检测
 ```
 
@@ -83,19 +93,16 @@ source /usr/local/Ascend/ascend-toolkit/set_env.sh
 ### 场景1: 电子元器件检测分拣
 
 ```bash
-# 1. 训练模型（可选，也可使用预训练模型）
-cd training/route_a_electro
-python train.py --data data.yaml --epochs 100
+# 1. 最新训练工作区（yolo26）
+cd 2026_3_12
+python train_yolo26n_gpu.py
 
-# 2. 转换模型
-atc --model=yolov8n_electro61.onnx \
-    --framework=5 \
-    --output=yolov8n_electro61 \
-    --soc_version=Ascend310B1
+# 2. 导出最新 yolo26 到 Ascend 310B OM
+cd ..
+bash tools/export_latest_yolo26_to_om.sh
 
-# 3. 运行检测
-cd edge/route_a_app
-python detect.py --model ../../models/yolov8n_electro61.om
+# 3. 运行统一主线
+bash start_unified.sh
 ```
 
 ### 场景2: 手部安全监控
@@ -145,22 +152,21 @@ cd edge/unified_app
 
 # 不启用激光（仅检测）
 python3 unified_monitor.py \
-    --yolo-model ../models/yolov8n_electro61.om \
-    --data-yaml ../data/electro61.yaml \
+    --yolo-model ../../models/route_a_yolo26/yolo26n_aug_full_8419_gpu.om \
+    --data-yaml ../../config/yolo26_6cls.yaml \
     --danger-distance 300 \
     --conf-thres 0.55
 
 # 启用激光标注
 python3 unified_monitor.py \
-    --yolo-model ../models/yolov8n_electro61.om \
-    --data-yaml ../data/electro61.yaml \
+    --yolo-model ../../models/route_a_yolo26/yolo26n_aug_full_8419_gpu.om \
+    --data-yaml ../../config/yolo26_6cls.yaml \
     --danger-distance 300 \
     --conf-thres 0.55 \
     --enable-laser \
     --laser-serial /dev/ttyUSB0 \
     --laser-calibration ../laser_galvo/galvo_calibration.yaml \
-    --laser-min-score 0.7 \
-    --laser-target-classes capacitor resistor IC
+    --laser-min-score 0.7
 ```
 
 **快捷启动:**
@@ -198,13 +204,17 @@ cd edge/laser_galvo
 
 ### 串口协议
 
-当前正式工作链路使用 **STM32 文本协议**：
+当前正式工作链路使用 **STM32 文本批量协议**：
 
-- `R<i><x>,<y>,<w>,<h>\n`：矩形任务
-- `C<i><x>,<y>,<r>\n`：圆形任务
-- `U\n`：提交任务缓冲区
-- `G<x>,<y>\n`：立即移动（标定）
-- `L0\n` / `L1\n`：激光关/开（标定）
+- `0R,<x>,<y>,<w>,<h>;`：向槽位 `0` 写入矩形任务
+- `1C,<x>,<y>,<r>;`：向槽位 `1` 写入圆形任务
+- `U;`：提交任务缓冲区
+- 可在一个串口包中连续发送多个任务，例如：
+  `0C,1000,2000,500;1C,-2000,3000,800;U;`
+
+说明：
+- 现在是**索引在前、命令字母在后**，不是旧版 `R0...` / `C0...`
+- `G/L` 属于旧固件校准命令，不再是当前正式协议的一部分
 
 其中 `mirror/stm32f401ccu6_dac8563/Core/Src/main.c` 是当前正式实现；`edge/laser_galvo/stm32_galvo_protocol.c` 仅保留为早期二进制协议示例。
 
@@ -243,7 +253,7 @@ cd edge/laser_galvo
 1. 正式固件目录位于 `mirror/stm32f401ccu6_dac8563/`
 2. 串口协议入口位于 `Core/Src/main.c`
 3. DAC 驱动位于 `HARDWARE/dac8563/`
-4. 当前代码已支持 `U/C/R/G/L` 命令
+4. 当前正式协议已切换为 `0C,...;1R,...;U;` 这种批量文本格式
 
 详细分层说明见 `docs/galvo_code_map.md`
 

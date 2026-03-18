@@ -12,12 +12,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ICT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # 模型和配置（允许通过环境变量覆盖）
-YOLO_MODEL="${YOLO_MODEL:-$ICT_DIR/runs/detect/train_electro61/weights/yolov8_electro61_aipp.om}"
-DATA_YAML="${DATA_YAML:-$ICT_DIR/config/electro61.yaml}"
+YOLO_MODEL="${YOLO_MODEL:-$ICT_DIR/models/route_a_yolo26/yolo26n_aug_full_8419_gpu.om}"
+POSE_MODEL="${POSE_MODEL:-$ICT_DIR/yolov8n_pose_aipp.om}"
+DATA_YAML="${DATA_YAML:-$ICT_DIR/config/yolo26_6cls.yaml}"
 
 # 参数（允许通过环境变量覆盖）
 DANGER_DISTANCE="${DANGER_DISTANCE:-300}"
 CONF_THRES="${CONF_THRES:-0.55}"
+YOLO_DEVICE="${YOLO_DEVICE:-cpu}"
 LASER_SERIAL="${LASER_SERIAL:-/dev/ttyUSB0}"
 LASER_BAUDRATE="${LASER_BAUDRATE:-115200}"
 LASER_CALIBRATION="${LASER_CALIBRATION:-$ICT_DIR/edge/laser_galvo/galvo_calibration.yaml}"
@@ -30,6 +32,7 @@ echo ""
 # 检查基础文件
 if [ ! -f "$YOLO_MODEL" ]; then
     echo "错误: YOLO模型不存在: $YOLO_MODEL"
+    echo "提示: 先执行 $ICT_DIR/tools/export_latest_yolo26_to_om.sh 生成最新 yolo26 的 OM 文件"
     exit 1
 fi
 
@@ -40,12 +43,20 @@ fi
 
 # 构建命令
 CMD=(
-    python3 "$SCRIPT_DIR/unified_monitor.py"
+    /usr/bin/python3 "$SCRIPT_DIR/unified_monitor_mp.py"
     --yolo-model "$YOLO_MODEL"
+    --yolo-device "$YOLO_DEVICE"
     --data-yaml "$DATA_YAML"
     --danger-distance "$DANGER_DISTANCE"
     --conf-thres "$CONF_THRES"
 )
+
+if [ -f "$POSE_MODEL" ]; then
+    CMD+=(--pose-model "$POSE_MODEL")
+    echo "手部模型: 使用 YOLO pose ($POSE_MODEL)"
+else
+    echo "手部模型: 未找到 pose OM，回退到 MediaPipe ($POSE_MODEL)"
+fi
 
 # 检查是否启用激光
 if [[ " $* " == *" --enable-laser "* ]]; then

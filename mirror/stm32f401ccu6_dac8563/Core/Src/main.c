@@ -18,7 +18,6 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "dma.h"
 #include "spi.h"
 #include "usart.h"
 #include "gpio.h"
@@ -59,7 +58,7 @@ typedef struct
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define BUF_SIZE 1024
+#define SPEEED 2.0f
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -72,11 +71,13 @@ typedef struct
 /* USER CODE BEGIN PV */
 const float PI = 3.14159265358979323846f;
 
-uint8_t uart1_rx_buf[BUF_SIZE];
-
 task_t task_buf[10];
 task_t task_buf_1[10];
 volatile uint8_t flag_update = 0;
+
+int16_t current_x = 0;
+int16_t current_y = 0;
+uint8_t current_laser_state = 2; // 0=off, 1=on, 2=unknown
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -87,50 +88,87 @@ void SystemClock_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+void laser_on(void)
+{
+  if (current_laser_state == 1) return;
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_SET);
+  current_laser_state = 1;
+}
+
+void laser_off(void)
+{
+  if (current_laser_state == 0) return;
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET);
+  current_laser_state = 0;
+}
+
+void move(int16_t x, int16_t y)
+{
+  if (x == current_x && y == current_y) return;
+
+  float dx = x - current_x;
+  float dy = y - current_y;
+  float distance = sqrtf(dx * dx + dy * dy);
+  int steps = (int)(distance / 100.0f) + 1;
+  float step_dist = distance / steps;
+  uint32_t delay = (uint32_t)(step_dist * SPEEED);
+  if (delay == 0) delay = 1;
+
+  int16_t start_x = current_x;
+  int16_t start_y = current_y;
+
+  for (int i = 1; i <= steps; ++i)
+  {
+    int16_t px = start_x + (int16_t)(dx * i / steps);
+    int16_t py = start_y + (int16_t)(dy * i / steps);
+    dac8563_output_int16(px, py);
+    zjs_delay_us(delay);
+  }
+  current_x = x;
+  current_y = y;
+}
+
 void draw_circle(int16_t x, int16_t y, uint16_t radius)
 {
-  for (int i = 0; i < 90; ++i)
+  laser_off();
+  move(x + radius, y);
+  laser_on();
+
+  for (int i = 1; i <= 36; ++i)
   {
-    float theta = (2.0f * PI * i) / 90;
+    float theta = (2.0f * PI * i) / 36.0f;
     int16_t target_x = (int16_t)(radius * cosf(theta) + x);
     int16_t target_y = (int16_t)(radius * sinf(theta) + y);
-    dac8563_output_int16(target_x, target_y);
-    zjs_delay_us(20); // 根据需要调整速度
+    
+    move(target_x, target_y);
   }
+  laser_off();
 }
 
 void draw_rectangle(int16_t x, int16_t y, uint16_t length, uint16_t height)
 {
-  int i = 0;
-  for (i = 0; i < length; i += 100)
-  {
-    dac8563_output_int16(x - i + length / 2, y + height / 2);
-    zjs_delay_us(120);
-  }
-  for (i = 0; i < height; i += 100)
-  {
-    dac8563_output_int16(x - length / 2, y - i + height / 2);
-    zjs_delay_us(120);
-  }
-  for (i = 0; i < length; i += 100)
-  {
-    dac8563_output_int16(x + i - length / 2, y - height / 2);
-    zjs_delay_us(120);
-  }
-  for (i = 0; i < height; i += 100)
-  {
-    dac8563_output_int16(x + length / 2, y + i - height / 2);
-    zjs_delay_us(120);
-  }
-}
+  int16_t p1_x = x + length / 2;
+  int16_t p1_y = y + height / 2;
+  
+  int16_t p2_x = x - length / 2;
+  int16_t p2_y = p1_y;
+  
+  int16_t p3_x = p2_x;
+  int16_t p3_y = y - height / 2;
+  
+  int16_t p4_x = p1_x;
+  int16_t p4_y = p3_y;
+  
+  laser_off();
+  move(p1_x, p1_y);
+  laser_on();
 
-void move(int16_t x, int16_t y, uint16_t delay_us)
-{
-  zjs_delay_us(400);
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET);
-  dac8563_output_int16(x, y);
-  zjs_delay_us(delay_us);
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_SET);
+  move(p2_x, p2_y);
+  move(p3_x, p3_y);
+  move(p4_x, p4_y);
+  move(p1_x, p1_y);
+
+  laser_off();
 }
 
 pose_t get_next_pose(task_t *task)
@@ -154,72 +192,57 @@ pose_t get_next_pose(task_t *task)
   return pose;
 }
 
-void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
+void uart6_IDLE_callback(uint8_t *data, uint16_t num)
 {
-  if (huart->Instance == USART1)
+  uint8_t *buf = UART6_GetRxData();
+
+  char *token = strtok((char *)buf, ";");
+  while (token != NULL)
   {
-    if (uart1_rx_buf[0] == 'U')
+    if (token[0] == 'U')
     {
       flag_update = 1;
     }
-
-    if (uart1_rx_buf[0] == 'C')
+    else if (token[0] >= '0' && token[0] <= '9')
     {
-      int i = uart1_rx_buf[1] - '0';
-      int16_t x;
-      int16_t y;
-      uint16_t radius;
-      sscanf((const char *)&uart1_rx_buf[2], "%hd,%hd,%hu", &x, &y, &radius);
-
-      task_buf_1[i].type = CIRCLE;
-      task_buf_1[i].pose.x = x;
-      task_buf_1[i].pose.y = y;
-      task_buf_1[i].params[0] = radius;
-    }
-
-    if (uart1_rx_buf[0] == 'R')
-    {
-      int i = uart1_rx_buf[1] - '0';
-      int16_t x;
-      int16_t y;
-      uint16_t length;
-      uint16_t height;
-      sscanf((const char *)&uart1_rx_buf[2], "%hd,%hd,%hu,%hu", &x, &y, &length, &height);
-
-      task_buf_1[i].type = RECTANGLE;
-      task_buf_1[i].pose.x = x;
-      task_buf_1[i].pose.y = y;
-      task_buf_1[i].params[0] = length;
-      task_buf_1[i].params[1] = height;
-    }
-
-    // G 命令：立即移动到指定位置（标定模式使用）
-    if (uart1_rx_buf[0] == 'G')
-    {
-      int16_t x;
-      int16_t y;
-      sscanf((const char *)&uart1_rx_buf[1], "%hd,%hd", &x, &y);
-      dac8563_output_int16(x, y);
-    }
-
-    // L 命令：激光开关（标定模式使用）
-    if (uart1_rx_buf[0] == 'L')
-    {
-      if (uart1_rx_buf[1] == '1')
+      int i = token[0] - '0';
+      
+      if (token[1] == 'C')
       {
-        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_SET);
+        int16_t x;
+        int16_t y;
+        uint16_t radius;
+        if (sscanf(&token[2], ",%hd,%hd,%hu", &x, &y, &radius) == 3)
+        {
+          task_buf_1[i].type = CIRCLE;
+          task_buf_1[i].pose.x = x;
+          task_buf_1[i].pose.y = y;
+          task_buf_1[i].params[0] = radius;
+        }
       }
-      else if (uart1_rx_buf[1] == '0')
+      else if (token[1] == 'R')
       {
-        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET);
+        int16_t x;
+        int16_t y;
+        uint16_t length;
+        uint16_t height;
+        if (sscanf(&token[2], ",%hd,%hd,%hu,%hu", &x, &y, &length, &height) == 4)
+        {
+          task_buf_1[i].type = RECTANGLE;
+          task_buf_1[i].pose.x = x;
+          task_buf_1[i].pose.y = y;
+          task_buf_1[i].params[0] = length;
+          task_buf_1[i].params[1] = height;
+        }
       }
     }
-
-    HAL_UARTEx_ReceiveToIdle_DMA(huart, uart1_rx_buf, BUF_SIZE);
+    
+    token = strtok(NULL, ";");
   }
 
-  memset(uart1_rx_buf, 0, BUF_SIZE);
+  UART6_ClearRx();
 }
+
 /* USER CODE END 0 */
 
 /**
@@ -251,36 +274,43 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_DMA_Init();
   MX_USART1_UART_Init();
   MX_SPI1_Init();
+  MX_USART6_UART_Init();
   /* USER CODE BEGIN 2 */
   dac8563_init();
 
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_SET);
 
-  HAL_UARTEx_ReceiveToIdle_DMA(&huart1, uart1_rx_buf, BUF_SIZE);
+  UART1_Init();
+  UART6_Init();
+  UART6_Register_IDLE_callback(uart6_IDLE_callback);
+
+  // while (1)
+  // {
+  //   draw_rectangle(0, 0, 10000, 10000);
+  // }
 
   task_buf[0].type = CIRCLE;
   task_buf[0].pose.x = 5000;
   task_buf[0].pose.y = 5000;
-  task_buf[0].params[0] = 1000;
+  task_buf[0].params[0] = 10000;
 
-  task_buf[1].type = CIRCLE;
-  task_buf[1].pose.x = 0;
-  task_buf[1].pose.y = 5000;
-  task_buf[1].params[0] = 1000;
+  // task_buf[1].type = CIRCLE;
+  // task_buf[1].pose.x = 0;
+  // task_buf[1].pose.y = 5000;
+  // task_buf[1].params[0] = 1000;
 
-  task_buf[2].type = CIRCLE;
-  task_buf[2].pose.x = -5000;
-  task_buf[2].pose.y = 5000;
-  task_buf[2].params[0] = 1000;
+  // task_buf[2].type = CIRCLE;
+  // task_buf[2].pose.x = -5000;
+  // task_buf[2].pose.y = 5000;
+  // task_buf[2].params[0] = 1000;
 
-  task_buf[3].type = RECTANGLE;
-  task_buf[3].pose.x = 0;
-  task_buf[3].pose.y = 0;
-  task_buf[3].params[0] = 2000;
-  task_buf[3].params[1] = 1000;
+  // task_buf[3].type = RECTANGLE;
+  // task_buf[3].pose.x = 0;
+  // task_buf[3].pose.y = 0;
+  // task_buf[3].params[0] = 2000;
+  // task_buf[3].params[1] = 1000;
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -297,14 +327,12 @@ int main(void)
       switch (current_task->type)
       {
       case CIRCLE:
-        GPIO_FAST_SETBIT(A, 0);  
-        move(next_pose.x, next_pose.y, 1500);
+        GPIO_FAST_SETBIT(A, 0);
         draw_circle(current_task->pose.x, current_task->pose.y, current_task->params[0]);
         GPIO_FAST_RESETBIT(A, 0);
         break;
 
       case RECTANGLE:
-        move(next_pose.x, next_pose.y, 1500);
         draw_rectangle(current_task->pose.x, current_task->pose.y, current_task->params[0], current_task->params[1]);
         break;
       
@@ -316,11 +344,9 @@ int main(void)
     
     if (flag_update)
     {
-      
       memcpy((uint8_t *)task_buf, (uint8_t *)task_buf_1, sizeof(task_buf));
       memset((uint8_t *)task_buf_1, 0, sizeof(task_buf_1));
       flag_update = 0;
-      
     }
   }
   /* USER CODE END 3 */

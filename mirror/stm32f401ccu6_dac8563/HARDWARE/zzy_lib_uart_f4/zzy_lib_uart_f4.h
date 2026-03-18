@@ -26,12 +26,12 @@
 #define ZZY_USE_AT_FUNCS               0          // 是否使用at指令函数
 #define ZZY_USE_PRINTF                 1          // 是否使用串口重定向
 // 串口开关
-#define UART1_EN                       0          // 串口1，0=关、1=启用;  倘若没用到UART1, 置0，就不会开辟UART1发送缓存、接收缓存，省一点资源;
+#define UART1_EN                       1          // 串口1，0=关、1=启用;  倘若没用到UART1, 置0，就不会开辟UART1发送缓存、接收缓存，省一点资源;
 #define UART2_EN                       0          // 串口2，0=关、1=启用;  同上;
 #define UART3_EN                       0          // 串口3，0=关、1=启用;  同上;
 #define UART4_EN                       0          // 串口4，0=关、1=启用;  同上;
 #define UART5_EN                       0          // 串口5，0=关、1=启用;  同上;
-#define UART6_EN                       0          // 串口6，0=关、1=启用;  同上;
+#define UART6_EN                       1          // 串口6，0=关、1=启用;  同上;
 #define UART7_EN                       0          // 串口7，0=关、1=启用;  同上;
 #define UART8_EN                       0          // 串口8，0=关、1=启用;  同上;
 // 发送缓冲区大小

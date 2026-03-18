@@ -64,9 +64,9 @@ case $choice in
 
     4)
         cd ../unified_app
-        python3 unified_monitor_with_laser.py \
-            --yolo-model ../models/yolov8n_electro61.om \
-            --data-yaml ../data/electro61.yaml \
+        python3 unified_monitor.py \
+            --yolo-model ../../models/route_a_yolo26/yolo26n_aug_full_8419_gpu.om \
+            --data-yaml ../../config/yolo26_6cls.yaml \
             --danger-distance 300 \
             --conf-thres 0.55
         ;;
@@ -87,9 +87,9 @@ case $choice in
 
         cd ../unified_app
         if [ -z "$target_classes" ]; then
-            python3 unified_monitor_with_laser.py \
-                --yolo-model ../models/yolov8n_electro61.om \
-                --data-yaml ../data/electro61.yaml \
+            python3 unified_monitor.py \
+                --yolo-model ../../models/route_a_yolo26/yolo26n_aug_full_8419_gpu.om \
+                --data-yaml ../../config/yolo26_6cls.yaml \
                 --danger-distance 300 \
                 --conf-thres 0.55 \
                 --enable-laser \
@@ -97,9 +97,9 @@ case $choice in
                 --laser-calibration ../laser_galvo/galvo_calibration.yaml \
                 --laser-min-score "$min_score"
         else
-            python3 unified_monitor_with_laser.py \
-                --yolo-model ../models/yolov8n_electro61.om \
-                --data-yaml ../data/electro61.yaml \
+            python3 unified_monitor.py \
+                --yolo-model ../../models/route_a_yolo26/yolo26n_aug_full_8419_gpu.om \
+                --data-yaml ../../config/yolo26_6cls.yaml \
                 --danger-distance 300 \
                 --conf-thres 0.55 \
                 --enable-laser \

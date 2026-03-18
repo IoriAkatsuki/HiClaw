@@ -193,27 +193,29 @@ python3 calibrate_galvo.py \
 ### 第五步：运行完整系统
 
 ```bash
+# 如未生成最新 OM，请先执行：
+# bash /home/oasis/Documents/ICT/tools/export_latest_yolo26_to_om.sh
+
 cd /home/oasis/Documents/ICT/edge/unified_app
 
 # 基本运行（不启用激光）
 python3 unified_monitor.py \
-    --yolo-model ../models/yolov8n_electro61.om \
-    --data-yaml ../data/electro61.yaml \
+    --yolo-model ../../models/route_a_yolo26/yolo26n_aug_full_8419_gpu.om \
+    --data-yaml ../../config/yolo26_6cls.yaml \
     --danger-distance 300 \
     --conf-thres 0.55
 
 # 启用激光标注
 python3 unified_monitor.py \
-    --yolo-model ../models/yolov8n_electro61.om \
-    --data-yaml ../data/electro61.yaml \
+    --yolo-model ../../models/route_a_yolo26/yolo26n_aug_full_8419_gpu.om \
+    --data-yaml ../../config/yolo26_6cls.yaml \
     --danger-distance 300 \
     --conf-thres 0.55 \
     --enable-laser \
     --laser-serial /dev/ttyUSB0 \
     --laser-baudrate 115200 \
     --laser-calibration ../laser_galvo/galvo_calibration.yaml \
-    --laser-min-score 0.7 \
-    --laser-target-classes capacitor resistor IC
+    --laser-min-score 0.7
 ```
 
 **参数说明:**

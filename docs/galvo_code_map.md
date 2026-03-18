@@ -13,8 +13,8 @@
   - 负责像素坐标到振镜坐标转换
   - 负责发送 `R/C/U` 绘图命令
 - `edge/laser_galvo/calibrate_galvo.py`
-  - 标定核心实现
-  - 负责发送 `G/L` 命令、检测激光点、拟合单应矩阵、输出 YAML
+  - 历史标定实现
+  - 旧版依赖 `G/L` 命令；在当前正式固件协议下应视为历史参考
 - `edge/laser_galvo/auto_calibrate.py`
   - 自动化校准封装
   - 负责串口探测、重试策略、诊断文件输出
@@ -45,7 +45,7 @@
 
 - `mirror/stm32f401ccu6_dac8563/Core/Src/main.c`
   - 当前正式协议入口
-  - 已支持 `U/C/R/G/L` 命令
+  - 已支持新的 `idx+C/R` 批量任务协议与 `U;` 提交
 - `mirror/stm32f401ccu6_dac8563/HARDWARE/dac8563/dac8563.c`
   - DAC8563 底层驱动
 - `mirror/stm32f401ccu6_dac8563/HARDWARE/dac8563/dac8563.h`
@@ -68,19 +68,26 @@
 
 ## 3. 当前正式工作链路
 
+### 当前正式模型来源
+
+1. 训练源：`2026_3_12/runs/train/yolo26n_aug_full_8419_gpu/weights/best.pt`
+2. 正式部署产物：`models/route_a_yolo26/yolo26n_aug_full_8419_gpu.om`
+3. 正式运行配置：`config/yolo26_6cls.yaml`
+4. 导出入口：`tools/export_latest_yolo26_to_om.sh`
+
 ### 标定链路
 
-1. 上位机运行 `auto_calibrate.py` / `calibrate_galvo.py`
-2. 上位机向 STM32 发送 `G<x>,<y>` 和 `L0/L1`
-3. STM32 立即移动振镜并切换激光
-4. 上位机通过相机检测激光光斑位置
-5. 上位机计算 `像素 -> 振镜` 的单应矩阵并保存 YAML
+1. 当前正式固件已切换到 `idx + 命令字母 + 分号分隔` 的批量协议
+2. 正式命令形态为 `0C,...;1R,...;U;`
+3. 旧版 `G/L` 校准命令不再属于当前正式固件协议
+4. 仓库内 `auto_calibrate.py` / `calibrate_galvo.py` 目前应视为历史校准链路参考
+5. 如要恢复自动校准，需要按新固件重新设计板端即时定位协议
 
 ### 正常绘制链路
 
 1. `unified_monitor.py` 检测目标框
 2. `galvo_controller.py` 将像素框转换为振镜坐标
-3. 上位机批量发送 `R/C/U`
+3. 上位机批量发送 `0R,...;1C,...;U;`
 4. STM32 在任务缓冲区执行绘制
 
 ## 4. 修改入口建议

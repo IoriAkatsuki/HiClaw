@@ -46,6 +46,31 @@
             font-size: 1.1em;
         }
 
+        .nav-links {
+            margin-top: 15px;
+            display: flex;
+            justify-content: center;
+            gap: 12px;
+        }
+
+        .nav-link {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 10px 16px;
+            border-radius: 999px;
+            color: #fff;
+            text-decoration: none;
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.16);
+            transition: background 0.2s ease, transform 0.2s ease;
+        }
+
+        .nav-link:hover {
+            background: rgba(255, 255, 255, 0.16);
+            transform: translateY(-1px);
+        }
+
         .grid {
             display: grid;
             grid-template-columns: 2fr 1fr;
@@ -254,6 +279,9 @@
         <header>
             <h1>🔧 + 👋 Unified Detection Monitor</h1>
             <div class="subtitle">YOLOv8 Objects + MediaPipe Hands · RealSense D435</div>
+            <div class="nav-links">
+                <a class="nav-link" href="debug.html">打开 Debug 页面</a>
+            </div>
         </header>
 
         <div class="grid">

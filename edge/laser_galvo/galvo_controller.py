@@ -5,7 +5,6 @@
 用于物体检测后用激光绘制边界框
 """
 import serial
-import struct
 import time
 import numpy as np
 import cv2
@@ -52,7 +51,7 @@ class LaserGalvoController:
     def disconnect(self):
         """断开串口"""
         if self.ser and self.ser.is_open:
-            self.laser_off()
+            self.update_tasks()
             self.ser.close()
             print("✓ 振镜串口已断开")
 
@@ -111,15 +110,16 @@ class LaserGalvoController:
         发送文本命令到STM32
 
         Args:
-            command_str: 命令字符串（如 "R0 1000,2000,3000,4000"）
+            command_str: 命令字符串（如 "0R,1000,2000,3000,4000;"）
         """
         if self.ser is None or not self.ser.is_open:
             print(f"[GALVO] 串口未打开")
             return False
 
         try:
-            # 发送命令（添加换行符）
-            cmd_bytes = (command_str + '\n').encode('utf-8')
+            if not command_str.endswith(";"):
+                command_str = command_str + ";"
+            cmd_bytes = command_str.encode("utf-8")
             self.ser.write(cmd_bytes)
             print(f"[GALVO] → {command_str}")  # 调试输出
             time.sleep(0.005)  # 短暂延迟确保STM32处理
@@ -130,7 +130,16 @@ class LaserGalvoController:
 
     def update_tasks(self):
         """发送更新标志，让STM32切换到新的任务缓冲区"""
-        return self._send_text_command('U')
+        return self._send_text_command("U;")
+
+    def laser_on(self):
+        """新固件不再支持独立 L1 指令，保留兼容接口。"""
+        print("[GALVO] 当前固件不支持独立 laser_on 指令")
+        return False
+
+    def laser_off(self):
+        """清空任务，停止当前绘制。"""
+        return self.update_tasks()
 
     def draw_circle(self, x_galvo, y_galvo, radius, task_index=None):
         """
@@ -146,7 +155,7 @@ class LaserGalvoController:
             task_index = self.task_index
             self.task_index = (self.task_index + 1) % 10
 
-        cmd = f"C{task_index}{x_galvo},{y_galvo},{radius}"
+        cmd = f"{task_index}C,{x_galvo},{y_galvo},{radius}"
         return self._send_text_command(cmd)
 
     def draw_box(
@@ -200,7 +209,7 @@ class LaserGalvoController:
             task_index = self.task_index
             self.task_index = (self.task_index + 1) % 10
 
-        cmd = f"R{task_index}{center_x_galvo},{center_y_galvo},{width_galvo},{height_galvo}"
+        cmd = f"{task_index}R,{center_x_galvo},{center_y_galvo},{width_galvo},{height_galvo}"
         return self._send_text_command(cmd)
 
     def draw_boxes(self, boxes, image_width=640, image_height=480, delay_between_boxes=0.05):

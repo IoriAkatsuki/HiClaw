@@ -41,7 +41,7 @@
 ### 3.2 性能优化 (NPU 集成)
 由于 FastLLM 当前分支不支持 NPU，而手写 ACL 太复杂，接下来的重点是寻找**中间件解决方案**：
 - **方案 A (推荐)**: 寻找适配了 Ascend 的 FastLLM 分支（如 `fastllm-ascend` 或社区 fork）并重新编译。
-- **方案 B**: 尝试华为官方的 **MindIE** (Mind Inference Engine) 框架，这是目前在 Ascend 上部署 LLM 的标准推荐方案，支持 transformer 结构和高并发。
+- **方案 B**: 尝试华为官方的 **MindIE** (Mind Inference Engine) 框架。需要强调的是，`310B / 300I / OrangePi` 并非完全被 `MindIE` 排除，但是否可行取决于**目标模型是否在官方适配列表内**以及板端是否已安装完整的 `NNAL / ATB / MindIE` 运行时。对当前项目里的 `Qwen3.5` 而言，尚无证据表明其已在 `310B1` 上获得官方 `MindIE / ATB` 适配。
 - **方案 C**: 继续完善 ACL 推理脚本，增加 KV Cache 管理和 Tokenizer 集成（难度高，仅作为最后手段）。
 
 ### 3.3 模型升级

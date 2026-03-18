@@ -2,7 +2,6 @@
 "stm32f401ccu6\startup_stm32f401xc.o"
 "stm32f401ccu6\main.o"
 "stm32f401ccu6\gpio.o"
-"stm32f401ccu6\dma.o"
 "stm32f401ccu6\spi.o"
 "stm32f401ccu6\usart.o"
 "stm32f401ccu6\stm32f4xx_it.o"
@@ -25,6 +24,7 @@
 "stm32f401ccu6\system_stm32f4xx.o"
 "stm32f401ccu6\zzy_lib_delay.o"
 "stm32f401ccu6\dac8563.o"
+"stm32f401ccu6\zzy_lib_uart_f4.o"
 --strict --scatter "stm32f401ccu6\stm32f401ccu6.sct"
 --summary_stderr --info summarysizes --map --load_addr_map_info --xref --callgraph --symbols
 --info sizes --info totals --info unused --info veneers

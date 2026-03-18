@@ -19,6 +19,7 @@ class DummyLaserGalvoController(LaserGalvoController):
     def __init__(self):
         super().__init__(serial_port="/dev/null", baudrate=115200, calibration_file=None)
         self.sent_commands = []
+        self.ser = type("DummySerial", (), {"is_open": True, "close": lambda self: None})()
 
     def _send_text_command(self, command_str):
         self.sent_commands.append(command_str)
@@ -32,7 +33,7 @@ class LaserDrawBoxCompatTest(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertEqual(len(controller.sent_commands), 1)
-        self.assertTrue(controller.sent_commands[0].startswith("R0"))
+        self.assertTrue(controller.sent_commands[0].startswith("0R,"))
 
     def test_draw_box_command_is_consistent_with_or_without_steps_arg(self):
         controller_a = DummyLaserGalvoController()
@@ -42,6 +43,20 @@ class LaserDrawBoxCompatTest(unittest.TestCase):
         controller_b.draw_box([100, 120, 220, 260], pixel_coords=True, steps_per_edge=15)
 
         self.assertEqual(controller_a.sent_commands[0], controller_b.sent_commands[0])
+
+    def test_disconnect_sends_laser_off_command(self):
+        controller = DummyLaserGalvoController()
+
+        controller.disconnect()
+
+        self.assertIn("U;", controller.sent_commands)
+
+    def test_update_tasks_uses_semicolon_terminated_u_command(self):
+        controller = DummyLaserGalvoController()
+
+        controller.update_tasks()
+
+        self.assertEqual(controller.sent_commands[-1], "U;")
 
 
 if __name__ == "__main__":

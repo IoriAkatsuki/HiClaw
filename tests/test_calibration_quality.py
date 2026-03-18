@@ -96,6 +96,41 @@ class CalibrationQualityTest(unittest.TestCase):
         self.assertTrue(c.calculate_homography())
         self.assertTrue(c.quality_metrics.get('pass', False))
 
+    def test_calculate_homography_still_uses_pixel_points_when_cam_points_exist(self):
+        c = GalvoCalibrator(
+            min_valid_points=4,
+            mean_error_thres=300.0,
+            max_error_thres=700.0,
+        )
+
+        c.valid_galvo_points = [
+            (-1000, -1000),
+            (1000, -1000),
+            (1000, 1000),
+            (-1000, 1000),
+        ]
+        c.pixel_points = [
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (1.0, 1.0),
+            (0.0, 1.0),
+        ]
+        c.cam_points = [
+            (-10.0, -10.0),
+            (10.0, -10.0),
+            (10.0, 10.0),
+            (-10.0, 10.0),
+        ]
+
+        self.assertTrue(c.calculate_homography())
+        mapped = cv2.perspectiveTransform(
+            np.array([[[0.0, 0.0]]], dtype=np.float32),
+            c.homography_matrix,
+        )
+        self.assertAlmostEqual(float(mapped[0][0][0]), -1000.0, places=3)
+        self.assertAlmostEqual(float(mapped[0][0][1]), -1000.0, places=3)
+        self.assertEqual(c.quality_metrics.get('mapping_source'), 'pixel')
+
     def test_custom_axis_ranges_expand_grid(self):
         c = GalvoCalibrator(
             grid_size=5,
@@ -137,6 +172,61 @@ class CalibrationQualityTest(unittest.TestCase):
         self.assertGreater(suggestion['y_range'], 5000)
         self.assertLessEqual(suggestion['x_range'], 27767)
         self.assertLessEqual(suggestion['y_range'], 27767)
+
+    def test_show_marker_uses_new_packet_protocol(self):
+        class DummyCalibrator(GalvoCalibrator):
+            def __init__(self):
+                super().__init__()
+                self.commands = []
+
+            def _write_command(self, command):
+                self.commands.append(command)
+                return True
+
+        c = DummyCalibrator()
+        ok = c.show_marker(100, -200, radius=300, slot=1)
+
+        self.assertTrue(ok)
+        self.assertEqual(c.commands[-1], "1C,100,-200,300;U;")
+
+    def test_clear_tasks_uses_update_only_packet(self):
+        class DummyCalibrator(GalvoCalibrator):
+            def __init__(self):
+                super().__init__()
+                self.commands = []
+
+            def _write_command(self, command):
+                self.commands.append(command)
+                return True
+
+        c = DummyCalibrator()
+        ok = c.clear_tasks()
+
+        self.assertTrue(ok)
+        self.assertEqual(c.commands[-1], "U;")
+
+    def test_sample_depth_returns_roi_median(self):
+        class FakeDepthFrame:
+            def __init__(self, mapping):
+                self.mapping = mapping
+
+            def get_distance(self, x, y):
+                return self.mapping.get((x, y), 0.0)
+
+        c = GalvoCalibrator()
+        depth_frame = FakeDepthFrame(
+            {
+                (10, 10): 0.50,
+                (11, 10): 0.52,
+                (10, 11): 0.0,
+                (11, 11): 0.48,
+                (12, 11): 0.51,
+            }
+        )
+
+        depth = c.sample_depth(depth_frame, 11, 10, radius=1)
+
+        self.assertAlmostEqual(depth, 0.505, places=3)
 
 
 if __name__ == '__main__':

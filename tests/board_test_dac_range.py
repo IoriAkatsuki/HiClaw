@@ -6,7 +6,7 @@ Run on board: python3 -u tests/board_test_dac_range.py
 
 Sweeps galvo positions from center outward to find physical limits.
 Observes where the laser spot stops moving or hits mechanical limits.
-Uses CONFIRMED firmware format: C<idx><x>,<y>,<r>
+Uses CONFIRMED firmware format: <idx>C,<x>,<y>,<r>;U;
 
 Safety: starts small, increases gradually. Ctrl+C to abort.
 """
@@ -23,9 +23,7 @@ def send(ser, cmd):
 
 def goto(ser, x, y):
     """Move galvo to position using a small circle marker."""
-    send(ser, f"C0{x},{y},200\n")
-    time.sleep(0.02)
-    send(ser, "U\n")
+    send(ser, f"0C,{x},{y},200;U;")
 
 def test_dac_range():
     ser = serial.Serial(PORT, BAUD, timeout=1)
@@ -75,7 +73,7 @@ def test_dac_range():
     print("\n  Returned to center (0, 0)")
 
     # Clear
-    send(ser, "U\n")
+    send(ser, "U;")
     ser.close()
     print("\n" + "=" * 60)
     print("TEST 2 COMPLETE")
@@ -88,5 +86,5 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\n\nAborted by user.")
         ser = serial.Serial(PORT, BAUD, timeout=1)
-        send(ser, "U\n")
+        send(ser, "U;")
         ser.close()
