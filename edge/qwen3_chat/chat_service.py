@@ -7,8 +7,10 @@ import re, time, sys
 import numpy as np
 from pathlib import Path
 
-DEFAULT_OM   = str(Path.home() / "ICT/models/qwen3_0.6b_seq512.om")
-DEFAULT_TOK  = str(Path.home() / "ICT/models/qwen3-0.6b")
+DEFAULT_OM       = str(Path.home() / "ICT/models/qwen3_0.6b_seq512.om")
+DEFAULT_PREFILL  = str(Path.home() / "ICT/models/qwen3_prefill.om")
+DEFAULT_DECODE   = str(Path.home() / "ICT/models/qwen3_decode.om")
+DEFAULT_TOK      = str(Path.home() / "ICT/models/qwen3-0.6b")
 
 
 def _sample_top_p(logits: np.ndarray, temperature: float = 0.7,
@@ -35,13 +37,24 @@ class ChatSession:
 
     def __init__(self, om_path: str = DEFAULT_OM, tok_dir: str = DEFAULT_TOK,
                  max_new_tokens: int = 128, temperature: float = 0.7,
-                 top_p: float = 0.9):
+                 top_p: float = 0.9,
+                 prefill_om: str = DEFAULT_PREFILL,
+                 decode_om: str = DEFAULT_DECODE):
         from transformers import AutoTokenizer
         self.tok = AutoTokenizer.from_pretrained(tok_dir, trust_remote_code=True)
 
-        from acl_backend import OmModel
-        self.model = OmModel(om_path)
-        self.max_seq = self.model.seq_len
+        self._use_kv = Path(prefill_om).exists() and Path(decode_om).exists()
+        if self._use_kv:
+            from acl_backend import KVCacheModel
+            self.model = KVCacheModel(prefill_om, decode_om)
+            self.max_seq = self.model.max_seq
+            print(f"[ChatSession] KV cache mode (prefill+decode), max_seq={self.max_seq}")
+        else:
+            from acl_backend import OmModel
+            self.model = OmModel(om_path)
+            self.max_seq = self.model.seq_len
+            print(f"[ChatSession] Prefill-only mode, max_seq={self.max_seq}")
+
         self.max_new = max_new_tokens
         self.temperature = temperature
         self.top_p = top_p
@@ -74,18 +87,10 @@ class ChatSession:
         generated: list[int] = []
         t0 = time.time()
 
-        for _ in range(self.max_new):
-            all_ids = prompt_ids + generated
-            if len(all_ids) >= self.max_seq:
-                break
-
-            logits = self.model.forward(all_ids)
-            next_logits = logits[-1]
-            tok_id = _sample_top_p(next_logits, self.temperature, self.top_p)
-
-            if tok_id in self.eos_ids:
-                break
-            generated.append(tok_id)
+        if self._use_kv:
+            generated = self._generate_kv(prompt_ids)
+        else:
+            generated = self._generate_prefill_only(prompt_ids)
 
         elapsed = time.time() - t0
         n = len(generated)
@@ -95,6 +100,33 @@ class ChatSession:
         reply = re.sub(r"<think>.*?</think>", "", reply, flags=re.DOTALL).strip()
         self.messages.append({"role": "assistant", "content": reply})
         return reply, n, speed
+
+    def _generate_prefill_only(self, prompt_ids: list[int]) -> list[int]:
+        generated = []
+        for _ in range(self.max_new):
+            all_ids = prompt_ids + generated
+            if len(all_ids) >= self.max_seq:
+                break
+            logits = self.model.forward(all_ids)
+            tok_id = _sample_top_p(logits[-1], self.temperature, self.top_p)
+            if tok_id in self.eos_ids:
+                break
+            generated.append(tok_id)
+        return generated
+
+    def _generate_kv(self, prompt_ids: list[int]) -> list[int]:
+        self.model.reset_kv()
+        logits = self.model.prefill(prompt_ids)
+        generated = []
+        for _ in range(self.max_new):
+            if self.model._kv_pos + len(generated) >= self.max_seq:
+                break
+            tok_id = _sample_top_p(logits, self.temperature, self.top_p)
+            if tok_id in self.eos_ids:
+                break
+            generated.append(tok_id)
+            logits = self.model.decode_step(tok_id)
+        return generated
 
     def close(self):
         self.model.close()
