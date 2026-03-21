@@ -184,11 +184,18 @@ class MyHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
         if parsed.path == "/api/chat/status":
             with _chat_lock:
                 s = _chat_session
-            from chat_service import BACKENDS
+            try:
+                chat_dir = str(Path(__file__).resolve().parent.parent / "qwen3_chat")
+                if chat_dir not in sys.path:
+                    sys.path.insert(0, chat_dir)
+                from chat_service import BACKENDS
+                backends = {k: v["label"] for k, v in BACKENDS.items()}
+            except Exception:
+                backends = {}
             self._send_json({
                 "ready": s is not None,
                 "backend": s.backend_name if s else None,
-                "backends": {k: v["label"] for k, v in BACKENDS.items()},
+                "backends": backends,
             })
             return
         return super().do_GET()
