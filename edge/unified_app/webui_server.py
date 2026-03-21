@@ -39,6 +39,22 @@ import control_plane as cp  # noqa: E402
 _calib_proc: dict = {"pid": None, "log_path": "", "proc": None, "exit_code": None}
 _calib_lock = threading.Lock()
 
+# ── Chat backend (lazy init) ──
+_chat_lock = threading.Lock()
+_chat_session = None
+
+
+def _get_chat_session():
+    global _chat_session
+    if _chat_session is not None:
+        return _chat_session
+    chat_dir = str(Path(__file__).resolve().parent.parent / "qwen3_chat")
+    if chat_dir not in sys.path:
+        sys.path.insert(0, chat_dir)
+    from chat_service import ChatSession
+    _chat_session = ChatSession(max_new_tokens=128, temperature=0.0)
+    return _chat_session
+
 
 def _tail_log(log_path: str, limit: int = 20) -> str:
     path = Path(log_path)
@@ -159,6 +175,22 @@ class MyHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
         if parsed.path == "/api/control/calibration/status":
             self._send_json(_get_calibration_status())
             return
+        if parsed.path == "/api/chat/history":
+            with _chat_lock:
+                s = _chat_session
+                msgs = [m for m in s.messages if m["role"] != "system"] if s else []
+            self._send_json({"messages": msgs})
+            return
+        if parsed.path == "/api/chat/status":
+            with _chat_lock:
+                s = _chat_session
+            from chat_service import BACKENDS
+            self._send_json({
+                "ready": s is not None,
+                "backend": s.backend_name if s else None,
+                "backends": {k: v["label"] for k, v in BACKENDS.items()},
+            })
+            return
         return super().do_GET()
 
     def do_POST(self):
@@ -226,6 +258,31 @@ class MyHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
             if parsed.path == "/api/control/marker/select":
                 marker_state = cp.save_marker_state(ICT_ROOT, payload)
                 self._send_json({"status": "ok", "marker_state": marker_state})
+                return
+            # ── Chat endpoints ──
+            if parsed.path == "/api/chat/send":
+                msg = str(payload.get("message", "")).strip()
+                if not msg:
+                    self._send_json({"error": "empty message"}, status=400)
+                    return
+                with _chat_lock:
+                    s = _get_chat_session()
+                    reply, n, speed = s.generate(msg)
+                self._send_json({"reply": reply, "tokens": n, "speed": round(speed, 2),
+                                 "backend": s.backend_name})
+                return
+            if parsed.path == "/api/chat/reset":
+                with _chat_lock:
+                    if _chat_session:
+                        _chat_session.reset()
+                self._send_json({"ok": True})
+                return
+            if parsed.path == "/api/chat/switch":
+                name = str(payload.get("backend", "")).strip()
+                with _chat_lock:
+                    s = _get_chat_session()
+                    s.switch_backend(name)
+                self._send_json({"ok": True, "backend": s.backend_name})
                 return
         except ValueError as exc:
             self._send_json({"error": str(exc)}, status=400)
