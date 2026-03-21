@@ -38,6 +38,8 @@ def _get_chat_session():
 
 def sync_template_assets(target_dir: Path) -> None:
     target_dir.mkdir(parents=True, exist_ok=True)
+    if TEMPLATE_DIR.resolve() == target_dir.resolve():
+        return
     for name in ("index.html", "debug.html", "jmuxer.min.js"):
         src = TEMPLATE_DIR / name
         if src.exists():
