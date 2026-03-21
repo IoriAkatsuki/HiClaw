@@ -128,6 +128,20 @@
             font-size: 0.95rem;
         }
 
+        .debug-disabled-banner {
+            margin-top: 14px;
+            padding: 12px 14px;
+            border-radius: 12px;
+            background: rgba(245, 158, 11, 0.12);
+            border: 1px solid rgba(245, 158, 11, 0.35);
+            color: #fcd34d;
+            display: none;
+        }
+
+        .debug-disabled-banner.visible {
+            display: block;
+        }
+
         .legend span::before {
             content: "";
             display: inline-block;
@@ -277,6 +291,7 @@
                     <img id="debugFrame" src="debug_frame.jpg" alt="Debug Frame">
                     <img id="overlayImage" src="debug_overlay.png" alt="Detection Overlay">
                 </div>
+                <div class="debug-disabled-banner" id="debugDisabledBanner">调试图产物已关闭，请使用带调试开关的启动参数重新运行。</div>
                 <div class="legend">
                     <span class="box">普通识别框</span>
                     <span class="locked">当前锁定目标</span>
@@ -321,8 +336,10 @@
         const objectCount = document.getElementById('objectCount');
         const lockedCount = document.getElementById('lockedCount');
         const objectList = document.getElementById('objectList');
+        const debugDisabledBanner = document.getElementById('debugDisabledBanner');
 
         let isConnected = false;
+        let debugAssetsEnabled = true;
 
         overlayToggle.addEventListener('change', () => {
             overlayImage.classList.toggle('hidden', !overlayToggle.checked);
@@ -365,6 +382,15 @@
                 fpsValue.textContent = (data.fps || 0).toFixed(1);
                 objectCount.textContent = data.objects || 0;
                 lockedCount.textContent = (data.locked_track_ids || []).length;
+                debugAssetsEnabled = data.write_debug_assets !== false;
+                debugDisabledBanner.classList.toggle('visible', !debugAssetsEnabled);
+                if (!debugAssetsEnabled) {
+                    debugFrame.removeAttribute('src');
+                    overlayImage.removeAttribute('src');
+                    overlayImage.classList.add('hidden');
+                } else if (overlayToggle.checked) {
+                    overlayImage.classList.remove('hidden');
+                }
                 renderObjects(data.object_details || []);
             } catch (err) {
                 if (isConnected) {
@@ -376,6 +402,9 @@
         }
 
         function updateImages() {
+            if (!debugAssetsEnabled) {
+                return;
+            }
             debugFrame.src = 'debug_frame.jpg?' + Date.now();
             overlayImage.src = 'debug_overlay.png?' + Date.now();
         }

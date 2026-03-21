@@ -42,6 +42,9 @@ class AclLiteResource:
         self.context, ret = acl.rt.create_context(self.device_id)
         if ret != 0:
             raise RuntimeError(f"create_context failed: {ret}")
+        ret = acl.rt.set_context(self.context)
+        if ret != 0:
+            raise RuntimeError(f"set_context failed: {ret}")
         self.stream, ret = acl.rt.create_stream()
         if ret != 0:
             raise RuntimeError(f"create_stream failed: {ret}")
@@ -62,6 +65,7 @@ class AclLiteModel:
         self.output_sizes = []
         self.input_buffers = []
         self.output_buffers = []
+        self.host_output_buffers = []
         self.input_dataset = None
         self.output_dataset = None
 
@@ -92,6 +96,10 @@ class AclLiteModel:
             if ret != 0:
                 raise RuntimeError("malloc output failed")
             self.output_buffers.append(dev_ptr)
+            host_ptr, ret = acl.rt.malloc_host(size)
+            if ret != 0:
+                raise RuntimeError("malloc_host failed")
+            self.host_output_buffers.append(host_ptr)
         self.input_dataset = acl.mdl.create_dataset()
         for ptr, size in zip(self.input_buffers, self.input_sizes):
             acl.mdl.add_dataset_buffer(self.input_dataset, acl.create_data_buffer(ptr, size))
@@ -109,17 +117,16 @@ class AclLiteModel:
         if ret != 0:
             return None
         results = []
-        for ptr, size in zip(self.output_buffers, self.output_sizes):
-            host_buf, ret = acl.rt.malloc_host(size)
-            if ret != 0:
-                continue
+        for ptr, size, host_buf in zip(self.output_buffers, self.output_sizes, self.host_output_buffers):
             ret = acl.rt.memcpy(host_buf, size, ptr, size, 2)
             out_np = acl.util.ptr_to_numpy(host_buf, (size // 4,), 11)  # float32
             results.append(out_np.copy())
-            acl.rt.free_host(host_buf)
         return results
 
     def release(self):
+        for host_buf in self.host_output_buffers:
+            acl.rt.free_host(host_buf)
+        self.host_output_buffers = []
         if self.model_id:
             acl.mdl.unload(self.model_id)
 

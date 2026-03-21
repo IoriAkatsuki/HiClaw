@@ -292,9 +292,10 @@ def convert_ultralytics_result_to_objects(result) -> List[dict]:
     return objects
 
 
-def prepare_acl_yolo_input(frame: np.ndarray, input_format: str = "rgb_chw_float32") -> np.ndarray:
+def prepare_acl_yolo_input(frame: np.ndarray, input_format: str = "rgb_chw_float32",
+                           resizer=None) -> np.ndarray:
     """为 ACL YOLO 模型准备输入张量。"""
-    img = cv2.resize(frame, (640, 640))
+    img = resizer.resize(frame) if resizer else cv2.resize(frame, (640, 640))
     if input_format == "bgr_hwc_uint8":
         return img.astype(np.uint8)
     if input_format == "rgb_chw_float32":
@@ -714,6 +715,28 @@ def build_debug_overlay(
     return overlay
 
 
+def build_webui_artifact_plan(write_debug_assets: bool) -> Tuple[str, ...]:
+    """返回当前运行模式下需要刷新的 WebUI 产物清单。"""
+    artifacts = ["frame.jpg", "state.json"]
+    if write_debug_assets:
+        artifacts.extend(["debug_frame.jpg", "debug_overlay.png"])
+    return tuple(artifacts)
+
+
+def cleanup_optional_webui_artifacts(web_dir: Path, keep_names: Sequence[str]) -> None:
+    """清理当前模式不会再刷新的旧调试产物，避免前端读到陈旧文件。"""
+    keep = set(keep_names)
+    for name in ("debug_frame.jpg", "debug_overlay.png"):
+        if name in keep:
+            continue
+        path = web_dir / name
+        if path.exists():
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+
 def expand_box(box: Sequence[float], scale: float) -> List[float]:
     """以框中心为基准放大/缩小包围框。"""
     x1, y1, x2, y2 = [float(v) for v in box]
@@ -762,6 +785,18 @@ def should_refresh_laser_box(
     return max(width_ratio, height_ratio) >= size_threshold_ratio
 
 
+def resolve_camera_serial(devices, rs_module, preferred_serial: str = "") -> str:
+    preferred = (preferred_serial or "").strip()
+    available = [dev.get_info(rs_module.camera_info.serial_number) for dev in devices]
+    if not available:
+        raise RuntimeError("未找到 RealSense 设备")
+    if preferred:
+        if preferred not in available:
+            raise RuntimeError(f"指定相机序列号不存在: {preferred}")
+        return preferred
+    return available[0]
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--yolo-model", required=True, help="YOLO 模型路径，支持 .om / .pt / .onnx")
@@ -794,6 +829,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--laser-force-refresh-interval", type=float, default=0.35, help="即使变化不大也强制重发的最大间隔（秒）")
     parser.add_argument("--laser-update-interval", type=float, default=0.0, help="激光更新最小间隔（秒）")
     parser.add_argument("--max-laser-targets", type=int, default=1, help="激光同时标记的最大目标数")
+    parser.add_argument("--write-debug-assets", action="store_true", help="额外写出调试帧和透明叠加层")
+    parser.add_argument("--camera-serial", default="", help="指定 RealSense 序列号；为空时自动选择第一个设备")
     return parser
 
 
@@ -857,7 +894,7 @@ def main() -> None:
     devices = ctx.query_devices()
     if len(devices) == 0:
         raise RuntimeError("未找到 RealSense 设备")
-    serial = devices[0].get_info(rs.camera_info.serial_number)
+    serial = resolve_camera_serial(devices, rs, args.camera_serial)
 
     pipeline = rs.pipeline()
     config = rs.config()
@@ -902,7 +939,27 @@ def main() -> None:
 
     web_dir = Path.home() / "ICT" / "webui_http_unified"
     web_dir.mkdir(parents=True, exist_ok=True)
+    webui_artifacts = build_webui_artifact_plan(args.write_debug_assets)
+    cleanup_optional_webui_artifacts(web_dir, webui_artifacts)
+
+    # ── DVPP hardware accelerators (offload resize + JPEG from CPU) ──
+    dvpp_resizer = None
+    dvpp_jpege = None
+    try:
+        from dvpp_stream import DvppVpcResizer, DvppJpegEncoder
+        dvpp_resizer = DvppVpcResizer(640, 480, 640, 640)
+        print("✓ DVPP VPC resizer ready (640x480 → 640x640)")
+    except Exception as e:
+        print(f"  DVPP resizer unavailable, using cv2: {e}")
+    try:
+        from dvpp_stream import DvppJpegEncoder
+        dvpp_jpege = DvppJpegEncoder(640, 480, quality=75)
+        print("✓ DVPP JPEGE encoder ready")
+    except Exception as e:
+        print(f"  DVPP JPEGE unavailable, using cv2: {e}")
+
     print(f"\n✓ WebUI 输出: {web_dir}")
+    print(f"  产物: {', '.join(webui_artifacts)}")
     print("=" * 60)
     print("\n开始监控...\n")
 
@@ -924,7 +981,7 @@ def main() -> None:
         t0 = time.time()
         objects: List[dict] = []
         if yolo_backend == "acl":
-            img_yolo = prepare_acl_yolo_input(frame, args.yolo_acl_input_format)
+            img_yolo = prepare_acl_yolo_input(frame, args.yolo_acl_input_format, dvpp_resizer)
             yolo_outputs = yolo_model.execute(img_yolo)
             if yolo_outputs:
                 total = yolo_outputs[0].size
@@ -961,7 +1018,7 @@ def main() -> None:
         t0 = time.time()
         if not should_detect:
             return None, (time.time() - t0) * 1000.0
-        img_pose = cv2.resize(frame, (640, 640)).astype(np.uint8)
+        img_pose = (dvpp_resizer.resize(frame) if dvpp_resizer else cv2.resize(frame, (640, 640))).astype(np.uint8)
         outputs = pose_model.execute(img_pose)
         persons = postprocess_pose(outputs or [], frame.shape, conf_thres=args.pose_conf_thres)
         return persons, (time.time() - t0) * 1000.0
@@ -977,7 +1034,7 @@ def main() -> None:
 
             frame = np.asanyarray(color_frame.get_data())
             h_orig, w_orig = frame.shape[:2]
-            debug_frame = frame.copy()
+            debug_frame = frame.copy() if args.write_debug_assets else None
 
             objects, yolo_ms = run_yolo_inference(frame, h_orig, w_orig)
             objects, track_state, next_track_id = assign_track_ids(
@@ -1104,7 +1161,9 @@ def main() -> None:
             )
             current_candidate_ids = {obj.get("track_id") for obj in current_candidates}
             highlighted_ids = locked_track_ids or current_candidate_ids
-            debug_overlay = build_debug_overlay(w_orig, h_orig, objects, highlighted_track_ids=highlighted_ids)
+            debug_overlay = None
+            if args.write_debug_assets:
+                debug_overlay = build_debug_overlay(w_orig, h_orig, objects, highlighted_track_ids=highlighted_ids)
             draw_object_annotations(frame, objects, highlighted_track_ids=highlighted_ids)
 
             laser_marked = False
@@ -1191,9 +1250,17 @@ def main() -> None:
                     f"| 激光: {'ON' if laser_active else 'OFF'}"
                 )
 
-            cv2.imwrite(str(web_dir / "frame.jpg"), frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
-            cv2.imwrite(str(web_dir / "debug_frame.jpg"), debug_frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
-            cv2.imwrite(str(web_dir / "debug_overlay.png"), debug_overlay)
+            if dvpp_jpege:
+                try:
+                    jpeg_bytes = dvpp_jpege.encode(frame)
+                    (web_dir / "frame.jpg").write_bytes(jpeg_bytes)
+                except Exception:
+                    cv2.imwrite(str(web_dir / "frame.jpg"), frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+            else:
+                cv2.imwrite(str(web_dir / "frame.jpg"), frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+            if args.write_debug_assets and debug_frame is not None and debug_overlay is not None:
+                cv2.imwrite(str(web_dir / "debug_frame.jpg"), debug_frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                cv2.imwrite(str(web_dir / "debug_overlay.png"), debug_overlay, [cv2.IMWRITE_PNG_COMPRESSION, 1])
             state = {
                 "fps": fps,
                 "yolo_ms": yolo_ms,
@@ -1219,6 +1286,7 @@ def main() -> None:
                 "locked_track_ids": sorted(locked_track_ids),
                 "min_depth_mm": min_depth_mm,
                 "danger_object": danger_obj["name"] if danger_obj else None,
+                "write_debug_assets": args.write_debug_assets,
                 "ts": now,
             }
             with open(web_dir / "state.json", "w", encoding="utf-8") as f:

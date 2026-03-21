@@ -27,7 +27,9 @@ class LaserGalvoController:
         self.baudrate = baudrate
         self.ser = None
         self.homography_matrix = None
-        self.task_index = 0  # 任务索引，用于STM32协议
+        self.task_index = 0
+        self._batching = False
+        self._pending_cmds: list = []
 
         if calibration_file:
             self.load_calibration(calibration_file)
@@ -105,24 +107,37 @@ class LaserGalvoController:
 
         return (x_galvo, y_galvo)
 
-    def _send_text_command(self, command_str):
-        """
-        发送文本命令到STM32
+    def begin_batch(self) -> None:
+        """开始批量模式：后续命令缓存，不立即写串口。"""
+        self._batching = True
+        self._pending_cmds = []
 
-        Args:
-            command_str: 命令字符串（如 "0R,1000,2000,3000,4000;"）
-        """
+    def end_batch(self) -> bool:
+        """结束批量模式：将所有缓存命令合并为单次 serial.write() 写入。"""
+        self._batching = False
+        if not self._pending_cmds:
+            return True
+        payload = "".join(self._pending_cmds)
+        self._pending_cmds = []
         if self.ser is None or not self.ser.is_open:
-            print(f"[GALVO] 串口未打开")
+            return False
+        try:
+            self.ser.write(payload.encode("utf-8"))
+            return True
+        except Exception as e:
+            print(f"✗ 批量发送失败: {e}")
             return False
 
+    def _send_text_command(self, command_str):
+        if self.ser is None or not self.ser.is_open:
+            return False
+        if not command_str.endswith(";"):
+            command_str = command_str + ";"
+        if self._batching:
+            self._pending_cmds.append(command_str)
+            return True
         try:
-            if not command_str.endswith(";"):
-                command_str = command_str + ";"
-            cmd_bytes = command_str.encode("utf-8")
-            self.ser.write(cmd_bytes)
-            print(f"[GALVO] → {command_str}")  # 调试输出
-            time.sleep(0.005)  # 短暂延迟确保STM32处理
+            self.ser.write(command_str.encode("utf-8"))
             return True
         except Exception as e:
             print(f"✗ 发送命令失败: {e}")
@@ -130,6 +145,9 @@ class LaserGalvoController:
 
     def update_tasks(self):
         """发送更新标志，让STM32切换到新的任务缓冲区"""
+        if self._batching:
+            self._pending_cmds.append("U;")
+            return self.end_batch()
         return self._send_text_command("U;")
 
     def laser_on(self):

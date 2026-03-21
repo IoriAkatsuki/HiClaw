@@ -131,6 +131,42 @@ class CalibrationQualityTest(unittest.TestCase):
         self.assertAlmostEqual(float(mapped[0][0][1]), -1000.0, places=3)
         self.assertEqual(c.quality_metrics.get('mapping_source'), 'pixel')
 
+    def test_calculate_homography_passes_on_real_board_pixel_sample(self):
+        c = GalvoCalibrator(
+            min_valid_points=7,
+            mean_error_thres=300.0,
+            max_error_thres=700.0,
+        )
+
+        c.valid_galvo_points = [
+            (-15000, -15000),
+            (0, -15000),
+            (15000, -15000),
+            (-15000, 0),
+            (0, 0),
+            (15000, 0),
+            (-15000, 15000),
+            (0, 15000),
+            (15000, 15000),
+        ]
+        c.pixel_points = [
+            (446.1515808105469, 327.9466552734375),
+            (294.02825927734375, 334.966796875),
+            (139.53518676757812, 345.2388610839844),
+            (437.33184814453125, 179.58766174316406),
+            (287.2403564453125, 188.10638427734375),
+            (136.87074279785156, 196.8694610595703),
+            (442.3571472167969, 23.93762969970703),
+            (281.51361083984375, 37.05075454711914),
+            (122.91177368164062, 45.758663177490234),
+        ]
+
+        self.assertTrue(c.calculate_homography())
+        self.assertTrue(c.quality_metrics.get('pass', False))
+        self.assertEqual(c.quality_metrics.get('inlier_points'), 9)
+        self.assertLess(c.quality_metrics.get('mean_error', 1e9), 300.0)
+        self.assertLess(c.quality_metrics.get('max_error', 1e9), 700.0)
+
     def test_custom_axis_ranges_expand_grid(self):
         c = GalvoCalibrator(
             grid_size=5,

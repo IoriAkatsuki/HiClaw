@@ -11,6 +11,8 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 UNIFIED_TARGET = ROOT / "edge" / "unified_app" / "unified_monitor.py"
 SERVER_TARGET = ROOT / "edge" / "unified_app" / "webui_server.py"
+DEBUG_HTML_TARGET = ROOT / "webui_http_unified" / "debug.html"
+INDEX_HTML_TARGET = ROOT / "webui_http_unified" / "index.html"
 
 
 def load_unified_module():
@@ -58,6 +60,38 @@ class UnifiedMonitorDebugOverlayTest(unittest.TestCase):
 
             self.assertTrue((target_dir / "index.html").exists())
             self.assertTrue((target_dir / "debug.html").exists())
+
+    def test_sync_template_assets_skips_copy_when_source_and_target_are_same(self):
+        module = load_server_module()
+        original_template_dir = module.TEMPLATE_DIR
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target_dir = Path(tmpdir)
+            (target_dir / "index.html").write_text("index", encoding="utf-8")
+            (target_dir / "debug.html").write_text("debug", encoding="utf-8")
+            module.TEMPLATE_DIR = target_dir
+            try:
+                module.sync_template_assets(target_dir)
+            finally:
+                module.TEMPLATE_DIR = original_template_dir
+
+            self.assertEqual((target_dir / "index.html").read_text(encoding="utf-8"), "index")
+            self.assertEqual((target_dir / "debug.html").read_text(encoding="utf-8"), "debug")
+
+    def test_debug_page_supports_write_debug_assets_fallback(self):
+        source = DEBUG_HTML_TARGET.read_text(encoding="utf-8")
+
+        self.assertIn("write_debug_assets", source)
+        self.assertIn("调试图产物已关闭", source)
+
+    def test_dashboard_exposes_control_console_sections(self):
+        source = INDEX_HTML_TARGET.read_text(encoding="utf-8")
+
+        self.assertIn("MODEL", source)
+        self.assertIn("CONFIG", source)
+        self.assertIn("/api/control/config", source)
+        self.assertIn("/api/control/models", source)
+        self.assertIn("矩形框", source)
+        self.assertIn("圆形", source)
 
 
 if __name__ == "__main__":

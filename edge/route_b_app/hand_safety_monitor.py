@@ -53,6 +53,9 @@ class AclLiteModel:
         self.output_buffers = []
         self.input_sizes = []
         self.output_sizes = []
+        self.input_data_buffers = []
+        self.output_data_buffers = []
+        self.host_output_buffers = []
         self.context = None
 
     def load(self):
@@ -83,17 +86,37 @@ class AclLiteModel:
 
     def _prepare_io_buffers(self):
         """准备输入输出缓冲区"""
+        self.input_dataset = acl.mdl.create_dataset()
+        self.output_dataset = acl.mdl.create_dataset()
+        self.input_data_buffers = []
+        self.output_data_buffers = []
+        self.host_output_buffers = []
+
         for size in self.input_sizes:
             buf, ret = acl.rt.malloc(size, 0)  # ACL_MEM_MALLOC_HUGE_FIRST
             if ret != 0:
                 raise RuntimeError(f"malloc input buffer failed: {ret}")
             self.input_buffers.append(buf)
+            data_buffer = acl.create_data_buffer(buf, size)
+            acl.mdl.add_dataset_buffer(self.input_dataset, data_buffer)
+            self.input_data_buffers.append(data_buffer)
 
         for size in self.output_sizes:
             buf, ret = acl.rt.malloc(size, 0)
             if ret != 0:
                 raise RuntimeError(f"malloc output buffer failed: {ret}")
             self.output_buffers.append(buf)
+            data_buffer = acl.create_data_buffer(buf, size)
+            acl.mdl.add_dataset_buffer(self.output_dataset, data_buffer)
+            self.output_data_buffers.append(data_buffer)
+
+            host_buf = None
+            malloc_host = getattr(acl.rt, "malloc_host", None)
+            if malloc_host is not None:
+                host_buf, ret = malloc_host(size)
+                if ret != 0:
+                    raise RuntimeError(f"malloc_host failed: {ret}")
+            self.host_output_buffers.append(host_buf)
 
     def execute(self, image_bytes):
         """执行推理"""
@@ -107,42 +130,31 @@ class AclLiteModel:
             print(f"memcpy failed: {ret}")
             return None
 
-        # 创建输入数据集
-        input_dataset = acl.mdl.create_dataset()
-        input_data = acl.create_data_buffer(self.input_buffers[0], self.input_sizes[0])
-        acl.mdl.add_dataset_buffer(input_dataset, input_data)
-
-        # 创建输出数据集
-        output_dataset = acl.mdl.create_dataset()
-        for i, (buf, size) in enumerate(zip(self.output_buffers, self.output_sizes)):
-            output_data = acl.create_data_buffer(buf, size)
-            acl.mdl.add_dataset_buffer(output_dataset, output_data)
-
         # 执行推理
-        ret = acl.mdl.execute(self.model_id, input_dataset, output_dataset)
+        ret = acl.mdl.execute(self.model_id, self.input_dataset, self.output_dataset)
         if ret != 0:
             print(f"execute failed: {ret}")
-            acl.mdl.destroy_dataset(input_dataset)
-            acl.mdl.destroy_dataset(output_dataset)
             return None
 
         # 获取输出
         outputs = []
         for i, size in enumerate(self.output_sizes):
-            host_buf, ret = acl.rt.malloc_host(size)
-            if ret != 0:
-                break
+            host_buf = self.host_output_buffers[i] if i < len(self.host_output_buffers) else None
+            ephemeral = False
+            if host_buf is None:
+                host_buf, ret = acl.rt.malloc_host(size)
+                if ret != 0:
+                    break
+                ephemeral = True
             ret = acl.rt.memcpy(host_buf, size, self.output_buffers[i], size, 3)  # DEVICE_TO_HOST
             if ret != 0:
-                acl.rt.free_host(host_buf)
+                if ephemeral:
+                    acl.rt.free_host(host_buf)
                 break
             out_np = acl.util.ptr_to_numpy(host_buf, (size // 4,), 11)  # float32
             outputs.append(out_np.copy())
-            acl.rt.free_host(host_buf)
-
-        # 清理
-        acl.mdl.destroy_dataset(input_dataset)
-        acl.mdl.destroy_dataset(output_dataset)
+            if ephemeral:
+                acl.rt.free_host(host_buf)
 
         return outputs
 

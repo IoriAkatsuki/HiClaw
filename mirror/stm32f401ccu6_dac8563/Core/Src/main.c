@@ -43,6 +43,19 @@ typedef enum
 
 typedef struct
 {
+  uint8_t active;
+  uint8_t n;
+  int16_t v[16][2];
+} PolygonSlot;
+
+typedef struct
+{
+  int16_t x, y;
+  uint8_t blank;
+} DisplayPoint;
+
+typedef struct
+{
   int16_t x;
   int16_t y;
 } pose_t;
@@ -74,10 +87,22 @@ const float PI = 3.14159265358979323846f;
 task_t task_buf[10];
 task_t task_buf_1[10];
 volatile uint8_t flag_update = 0;
+volatile uint8_t uart6_packet_ready = 0;
+volatile uint16_t uart6_packet_len = 0;
+uint8_t uart6_pending_buf[UART6_RX_BUF_SIZE];
 
 int16_t current_x = 0;
 int16_t current_y = 0;
 uint8_t current_laser_state = 2; // 0=off, 1=on, 2=unknown
+
+PolygonSlot polygon_slots[10];
+PolygonSlot polygon_slots_1[10];
+
+#define MAX_DL_POINTS 512
+DisplayPoint display_list[MAX_DL_POINTS];
+volatile uint16_t dl_count = 0;
+volatile uint16_t dl_expected = 0;
+volatile uint8_t dl_mode = 0; // 0=normal, 1=uploading, 2=scanning
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -171,6 +196,144 @@ void draw_rectangle(int16_t x, int16_t y, uint16_t length, uint16_t height)
   laser_off();
 }
 
+void draw_polygon_slot(uint8_t slot)
+{
+  PolygonSlot *ps = &polygon_slots[slot];
+  if (!ps->active || ps->n < 3) return;
+  laser_off();
+  move(ps->v[0][0], ps->v[0][1]);
+  laser_on();
+  for (uint8_t i = 1; i < ps->n; i++)
+    move(ps->v[i][0], ps->v[i][1]);
+  move(ps->v[0][0], ps->v[0][1]);
+  laser_off();
+}
+
+void uart1_IDLE_callback(uint8_t *data, uint16_t num)
+{
+  if (num == 0) return;
+  if (num >= UART1_RX_BUF_SIZE) num = UART1_RX_BUF_SIZE - 1;
+  data[num] = '\0';
+  char *buf = (char *)data;
+
+  if (buf[0] == 'U')
+  {
+    flag_update = 1;
+  }
+  else if (buf[0] == 'G')
+  {
+    int16_t x, y;
+    if (sscanf(&buf[1], "%hd,%hd", &x, &y) == 2)
+    {
+      dac8563_output_int16(x, y);
+      current_x = x;
+      current_y = y;
+    }
+  }
+  else if (buf[0] == 'L')
+  {
+    if (buf[1] == '1') laser_on();
+    else if (buf[1] == '0') laser_off();
+  }
+  else if (buf[0] == 'R')
+  {
+    int slot = buf[1] - '0';
+    if (slot >= 0 && slot <= 9)
+    {
+      int16_t x, y;
+      uint16_t length, height;
+      if (sscanf(&buf[2], " %hd,%hd,%hu,%hu", &x, &y, &length, &height) == 4)
+      {
+        task_buf_1[slot].type = RECTANGLE;
+        task_buf_1[slot].pose.x = x;
+        task_buf_1[slot].pose.y = y;
+        task_buf_1[slot].params[0] = length;
+        task_buf_1[slot].params[1] = height;
+      }
+    }
+  }
+  else if (buf[0] == 'C')
+  {
+    int slot = buf[1] - '0';
+    if (slot >= 0 && slot <= 9)
+    {
+      int16_t x, y;
+      uint16_t radius;
+      if (sscanf(&buf[2], " %hd,%hd,%hu", &x, &y, &radius) == 3)
+      {
+        task_buf_1[slot].type = CIRCLE;
+        task_buf_1[slot].pose.x = x;
+        task_buf_1[slot].pose.y = y;
+        task_buf_1[slot].params[0] = radius;
+      }
+    }
+  }
+  else if (buf[0] == 'P')
+  {
+    int slot = buf[1] - '0';
+    if (slot < 0 || slot > 9) return;
+    int n = 0;
+    int offset = 0;
+    sscanf(&buf[2], " %d %n", &n, &offset);
+    if (n == 0)
+    {
+      polygon_slots_1[slot].active = 0;
+      polygon_slots_1[slot].n = 0;
+      return;
+    }
+    if (n < 3 || n > 16) return;
+    char *p = &buf[2] + offset;
+    for (int k = 0; k < n; k++)
+    {
+      int16_t vx, vy;
+      int consumed = 0;
+      if (sscanf(p, "%hd,%hd%n", &vx, &vy, &consumed) < 2) break;
+      polygon_slots_1[slot].v[k][0] = vx;
+      polygon_slots_1[slot].v[k][1] = vy;
+      p += consumed;
+      if (*p == ',') p++;
+    }
+    polygon_slots_1[slot].n = (uint8_t)n;
+    polygon_slots_1[slot].active = 1;
+  }
+  else if (buf[0] == 'D')
+  {
+    if (buf[1] == 'S')
+    {
+      dl_mode = 2;
+    }
+    else if (buf[1] == 'X')
+    {
+      dl_mode = 0;
+      laser_off();
+    }
+    else if (buf[1] == '+')
+    {
+      if (dl_mode == 1 && dl_count < MAX_DL_POINTS)
+      {
+        int16_t x, y;
+        int b;
+        if (sscanf(&buf[2], " %hd,%hd,%d", &x, &y, &b) == 3)
+        {
+          display_list[dl_count].x = x;
+          display_list[dl_count].y = y;
+          display_list[dl_count].blank = (uint8_t)(b != 0);
+          dl_count++;
+        }
+      }
+    }
+    else if (buf[1] >= '0' && buf[1] <= '9')
+    {
+      uint16_t n = 0;
+      sscanf(&buf[1], "%hu", &n);
+      if (n > MAX_DL_POINTS) n = MAX_DL_POINTS;
+      dl_expected = n;
+      dl_count = 0;
+      dl_mode = 1;
+    }
+  }
+}
+
 pose_t get_next_pose(task_t *task)
 {
   pose_t pose = task->pose;
@@ -192,53 +355,105 @@ pose_t get_next_pose(task_t *task)
   return pose;
 }
 
-void uart6_IDLE_callback(uint8_t *data, uint16_t num)
+void apply_uart6_token(char *token)
 {
-  uint8_t *buf = UART6_GetRxData();
+  if (token == NULL || token[0] == '\0')
+  {
+    return;
+  }
 
-  char *token = strtok((char *)buf, ";");
+  if (token[0] == 'U')
+  {
+    flag_update = 1;
+  }
+  else if (token[0] >= '0' && token[0] <= '9')
+  {
+    int i = token[0] - '0';
+
+    if (token[1] == 'C')
+    {
+      int16_t x;
+      int16_t y;
+      uint16_t radius;
+      if (sscanf(&token[2], ",%hd,%hd,%hu", &x, &y, &radius) == 3)
+      {
+        task_buf_1[i].type = CIRCLE;
+        task_buf_1[i].pose.x = x;
+        task_buf_1[i].pose.y = y;
+        task_buf_1[i].params[0] = radius;
+      }
+    }
+    else if (token[1] == 'R')
+    {
+      int16_t x;
+      int16_t y;
+      uint16_t length;
+      uint16_t height;
+      if (sscanf(&token[2], ",%hd,%hd,%hu,%hu", &x, &y, &length, &height) == 4)
+      {
+        task_buf_1[i].type = RECTANGLE;
+        task_buf_1[i].pose.x = x;
+        task_buf_1[i].pose.y = y;
+        task_buf_1[i].params[0] = length;
+        task_buf_1[i].params[1] = height;
+      }
+    }
+  }
+}
+
+void process_uart6_packet(void)
+{
+  uint8_t local_buf[UART6_RX_BUF_SIZE];
+  uint16_t local_len = 0;
+  char *token = NULL;
+
+  __disable_irq();
+  if (!uart6_packet_ready)
+  {
+    __enable_irq();
+    return;
+  }
+  local_len = uart6_packet_len;
+  memcpy(local_buf, uart6_pending_buf, local_len + 1);
+  uart6_packet_ready = 0;
+  uart6_packet_len = 0;
+  __enable_irq();
+
+  token = strtok((char *)local_buf, ";");
   while (token != NULL)
   {
-    if (token[0] == 'U')
-    {
-      flag_update = 1;
-    }
-    else if (token[0] >= '0' && token[0] <= '9')
-    {
-      int i = token[0] - '0';
-      
-      if (token[1] == 'C')
-      {
-        int16_t x;
-        int16_t y;
-        uint16_t radius;
-        if (sscanf(&token[2], ",%hd,%hd,%hu", &x, &y, &radius) == 3)
-        {
-          task_buf_1[i].type = CIRCLE;
-          task_buf_1[i].pose.x = x;
-          task_buf_1[i].pose.y = y;
-          task_buf_1[i].params[0] = radius;
-        }
-      }
-      else if (token[1] == 'R')
-      {
-        int16_t x;
-        int16_t y;
-        uint16_t length;
-        uint16_t height;
-        if (sscanf(&token[2], ",%hd,%hd,%hu,%hu", &x, &y, &length, &height) == 4)
-        {
-          task_buf_1[i].type = RECTANGLE;
-          task_buf_1[i].pose.x = x;
-          task_buf_1[i].pose.y = y;
-          task_buf_1[i].params[0] = length;
-          task_buf_1[i].params[1] = height;
-        }
-      }
-    }
-    
+    apply_uart6_token(token);
     token = strtok(NULL, ";");
   }
+}
+
+void uart6_IDLE_callback(uint8_t *data, uint16_t num)
+{
+  uint16_t available = 0;
+  uint16_t copy_len = num;
+
+  __disable_irq();
+  available = (UART6_RX_BUF_SIZE - 1) - uart6_packet_len;
+  __enable_irq();
+
+  if (copy_len > available)
+  {
+    copy_len = available;
+  }
+  if (copy_len >= UART6_RX_BUF_SIZE)
+  {
+    copy_len = UART6_RX_BUF_SIZE - 1;
+  }
+
+  __disable_irq();
+  memcpy(&uart6_pending_buf[uart6_packet_len], data, copy_len);
+  uart6_packet_len += copy_len;
+  uart6_pending_buf[uart6_packet_len] = '\0';
+  if (copy_len > 0)
+  {
+    uart6_packet_ready = 1;
+  }
+  __enable_irq();
 
   UART6_ClearRx();
 }
@@ -279,38 +494,17 @@ int main(void)
   MX_USART6_UART_Init();
   /* USER CODE BEGIN 2 */
   dac8563_init();
-
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_SET);
+  memset((uint8_t *)task_buf, 0, sizeof(task_buf));
+  memset((uint8_t *)task_buf_1, 0, sizeof(task_buf_1));
+  memset((uint8_t *)uart6_pending_buf, 0, sizeof(uart6_pending_buf));
 
   UART1_Init();
   UART6_Init();
+  UART1_Register_IDLE_callback(uart1_IDLE_callback);
   UART6_Register_IDLE_callback(uart6_IDLE_callback);
-
-  // while (1)
-  // {
-  //   draw_rectangle(0, 0, 10000, 10000);
-  // }
-
-  task_buf[0].type = CIRCLE;
-  task_buf[0].pose.x = 5000;
-  task_buf[0].pose.y = 5000;
-  task_buf[0].params[0] = 10000;
-
-  // task_buf[1].type = CIRCLE;
-  // task_buf[1].pose.x = 0;
-  // task_buf[1].pose.y = 5000;
-  // task_buf[1].params[0] = 1000;
-
-  // task_buf[2].type = CIRCLE;
-  // task_buf[2].pose.x = -5000;
-  // task_buf[2].pose.y = 5000;
-  // task_buf[2].params[0] = 1000;
-
-  // task_buf[3].type = RECTANGLE;
-  // task_buf[3].pose.x = 0;
-  // task_buf[3].pose.y = 0;
-  // task_buf[3].params[0] = 2000;
-  // task_buf[3].params[1] = 1000;
+  memset((uint8_t *)polygon_slots,   0, sizeof(polygon_slots));
+  memset((uint8_t *)polygon_slots_1, 0, sizeof(polygon_slots_1));
+  laser_off();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -320,33 +514,52 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    task_t *current_task;
-    for (current_task = &task_buf[0]; current_task->type != NONE; ++current_task)
-    {
-      pose_t next_pose = get_next_pose(current_task);
-      switch (current_task->type)
-      {
-      case CIRCLE:
-        GPIO_FAST_SETBIT(A, 0);
-        draw_circle(current_task->pose.x, current_task->pose.y, current_task->params[0]);
-        GPIO_FAST_RESETBIT(A, 0);
-        break;
+    process_uart6_packet();
 
-      case RECTANGLE:
-        draw_rectangle(current_task->pose.x, current_task->pose.y, current_task->params[0], current_task->params[1]);
-        break;
-      
-      default:
-        break;
+    if (dl_mode == 2)
+    {
+      for (uint16_t i = 0; i < dl_count && dl_mode == 2; i++)
+      {
+        if (display_list[i].blank) laser_off();
+        else laser_on();
+        move(display_list[i].x, display_list[i].y);
       }
     }
+    else
+    {
+      task_t *current_task;
+      for (current_task = &task_buf[0]; current_task->type != NONE; ++current_task)
+      {
+        switch (current_task->type)
+        {
+        case CIRCLE:
+          GPIO_FAST_SETBIT(A, 0);
+          draw_circle(current_task->pose.x, current_task->pose.y, current_task->params[0]);
+          GPIO_FAST_RESETBIT(A, 0);
+          break;
 
-    
+        case RECTANGLE:
+          draw_rectangle(current_task->pose.x, current_task->pose.y, current_task->params[0], current_task->params[1]);
+          break;
+
+        default:
+          break;
+        }
+      }
+
+      for (uint8_t s = 0; s < 10; s++)
+        draw_polygon_slot(s);
+    }
+
     if (flag_update)
     {
-      memcpy((uint8_t *)task_buf, (uint8_t *)task_buf_1, sizeof(task_buf));
-      memset((uint8_t *)task_buf_1, 0, sizeof(task_buf_1));
+      __disable_irq();
+      memcpy((uint8_t *)task_buf,         (uint8_t *)task_buf_1,        sizeof(task_buf));
+      memcpy((uint8_t *)polygon_slots,    (uint8_t *)polygon_slots_1,   sizeof(polygon_slots));
+      memset((uint8_t *)task_buf_1,       0, sizeof(task_buf_1));
+      memset((uint8_t *)polygon_slots_1,  0, sizeof(polygon_slots_1));
       flag_update = 0;
+      __enable_irq();
     }
   }
   /* USER CODE END 3 */

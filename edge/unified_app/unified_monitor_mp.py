@@ -33,6 +33,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import unified_monitor as um  # noqa: E402
+import control_plane as cp  # noqa: E402
 
 
 FRAME_WIDTH = 640
@@ -41,6 +42,47 @@ COLOR_SHAPE = (FRAME_HEIGHT, FRAME_WIDTH, 3)
 DEPTH_SHAPE = (FRAME_HEIGHT, FRAME_WIDTH)
 OVERLAY_SHAPE = (FRAME_HEIGHT, FRAME_WIDTH, 4)
 TEXT_SLOT_SIZE = 4096
+
+
+def build_webui_artifact_plan(write_debug_assets: bool) -> Tuple[str, ...]:
+    return um.build_webui_artifact_plan(write_debug_assets)
+
+
+def emit_marker_command(galvo, style: str, box: Sequence[float], *, frame_width: int, frame_height: int) -> bool:
+    if style == "circle":
+        x1, y1, x2, y2 = [float(v) for v in box]
+        center_x = (x1 + x2) / 2.0
+        center_y = (y1 + y2) / 2.0
+        radius_px = max(1.0, max(abs(x2 - x1), abs(y2 - y1)) / 2.0)
+        gx, gy = galvo.pixel_to_galvo(center_x, center_y, frame_width, frame_height)
+        radius = int(max(1.0, radius_px * 102.4))
+        return galvo.draw_circle(gx, gy, radius, task_index=0)
+    return galvo.draw_box(
+        box,
+        pixel_coords=True,
+        task_index=0,
+        image_width=frame_width,
+        image_height=frame_height,
+        steps_per_edge=15,
+    )
+
+
+def _resolve_marker_style(marker_state: dict, obj: dict) -> Tuple[bool, str]:
+    global_style = marker_state.get("marker_style", "rectangle")
+    if global_style not in cp.VALID_MARKER_STYLES:
+        global_style = "rectangle"
+    class_config = marker_state.get("class_config")
+    if not isinstance(class_config, dict):
+        return True, global_style
+    entry = class_config.get(str(obj.get("name") or ""))
+    if not isinstance(entry, dict):
+        return True, global_style
+    if not bool(entry.get("enabled", True)):
+        return False, global_style
+    style = entry.get("style", global_style)
+    if style not in cp.VALID_MARKER_STYLES:
+        style = global_style
+    return True, style
 
 
 def create_shared_buffer(shape: Tuple[int, ...], dtype: np.dtype):
@@ -71,6 +113,7 @@ class RuntimeSharedState:
         locked_track_ids,
         fatal_error,
         laser_error,
+        homography_matrix,
         worker_cpu_map,
         worker_pids,
     ):
@@ -84,6 +127,7 @@ class RuntimeSharedState:
         self.locked_track_ids = locked_track_ids
         self.fatal_error = fatal_error
         self.laser_error = laser_error
+        self.homography_matrix = homography_matrix
         self.worker_cpu_map = worker_cpu_map
         self.worker_pids = worker_pids
 
@@ -157,12 +201,14 @@ def create_runtime_shared_state(ctx, *, laser_enabled: bool) -> RuntimeSharedSta
         locked_track_ids=create_text_slot(ctx, 256),
         fatal_error=create_text_slot(ctx, 1024),
         laser_error=create_text_slot(ctx, 1024),
+        homography_matrix=create_text_slot(ctx, 2048),
         worker_cpu_map=create_text_slot(ctx, 256),
         worker_pids=create_text_slot(ctx, 256),
     )
     write_json_slot(runtime.locked_track_ids, [])
     write_json_slot(runtime.worker_cpu_map, {})
     write_json_slot(runtime.worker_pids, {})
+    write_json_slot(runtime.homography_matrix, None)
     return runtime
 
 
@@ -268,7 +314,7 @@ class DepthFrameProxy:
         return float(self.depth_map[y, x]) * self.depth_scale
 
 
-def capture_worker(color_name: str, depth_name: str, frame_seq, runtime, frame_ready_event, stop_event, worker_cpu):
+def capture_worker(color_name: str, depth_name: str, frame_seq, runtime, frame_ready_event, stop_event, worker_cpu, preferred_camera_serial: str):
     import pyrealsense2 as rs
 
     apply_worker_cpu_affinity("camera_capture", worker_cpu)
@@ -283,7 +329,12 @@ def capture_worker(color_name: str, depth_name: str, frame_seq, runtime, frame_r
         write_text_slot(runtime.fatal_error, "未找到 RealSense 设备")
         stop_event.set()
         return
-    serial = devices[0].get_info(rs.camera_info.serial_number)
+    try:
+        serial = um.resolve_camera_serial(devices, rs, preferred_camera_serial)
+    except Exception as exc:
+        write_text_slot(runtime.fatal_error, str(exc))
+        stop_event.set()
+        return
     config.enable_device(serial)
     config.enable_stream(rs.stream.color, FRAME_WIDTH, FRAME_HEIGHT, rs.format.bgr8, 30)
     config.enable_stream(rs.stream.depth, FRAME_WIDTH, FRAME_HEIGHT, rs.format.z16, 30)
@@ -350,6 +401,7 @@ def detection_worker(
     laser_queue,
     frame_ready_event,
     stop_event,
+    detect_ready_event,
     worker_cpu,
 ):
     apply_worker_cpu_affinity("detector", worker_cpu)
@@ -423,6 +475,7 @@ def detection_worker(
                 frame_ready_event.clear()
 
             h_orig, w_orig = frame.shape[:2]
+            seq_captured = seq
             if yolo_backend == "acl":
                 img_yolo = um.prepare_acl_yolo_input(frame, args.yolo_acl_input_format)
                 yolo_t0 = time.time()
@@ -451,6 +504,10 @@ def detection_worker(
                 yolo_t0 = time.time()
                 objects = yolo_model.infer(frame, args.conf_thres)
                 yolo_ms = (time.time() - yolo_t0) * 1000.0
+
+            # 跳帧：若推理期间相机已更新 ≥2 帧，丢弃过时结果并立即处理最新帧
+            if int(frame_seq.value) >= seq_captured + 2:
+                continue
 
             objects, track_state, next_track_id = um.assign_track_ids(
                 objects, track_state, next_track_id, iou_thres=args.track_iou_thres, max_missing=args.track_max_missing
@@ -534,10 +591,13 @@ def detection_worker(
                 text = f"DANGER {danger_obj['name']}" if danger_obj else "DANGER"
                 cv2.putText(annotated, text, (30, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 3)
             um.draw_object_annotations(annotated, objects, highlighted_track_ids=highlighted_ids)
-            overlay = um.build_debug_overlay(w_orig, h_orig, objects, highlighted_track_ids=highlighted_ids)
+            overlay = None
+            if args.write_debug_assets:
+                overlay = um.build_debug_overlay(w_orig, h_orig, objects, highlighted_track_ids=highlighted_ids)
 
             np.copyto(annotated_buf, annotated)
-            np.copyto(overlay_buf, overlay)
+            if overlay is not None:
+                np.copyto(overlay_buf, overlay)
 
             object_details, laser_objects = serialize_objects_for_state(objects, locked_track_ids)
             writer_snapshot = {
@@ -559,10 +619,12 @@ def detection_worker(
                 {
                     "laser_objects": laser_objects,
                     "is_danger": bool(is_danger),
+                    "detect_ts": time.time(),
                 },
             )
             with detect_seq.get_lock():
                 detect_seq.value += 1
+            detect_ready_event.set()
     finally:
         if hands is not None:
             hands.close()
@@ -603,6 +665,12 @@ def laser_worker(args, runtime, laser_queue, stop_event, worker_cpu):
     laser_active = False
     locked_track_ids: Set[int] = set()
     latest_payload = None
+    ict_root = Path.home() / "ICT"
+    # 坐标外推状态：track_id → (center_x, center_y, timestamp)
+    _extrap_state: Dict[int, Tuple[float, float, float]] = {}
+    # marker_state TTL 缓存，避免热循环每帧读文件
+    _marker_state_cache: dict = {}
+    _marker_state_ts: float = 0.0
 
     try:
         while not stop_event.is_set():
@@ -626,12 +694,25 @@ def laser_worker(args, runtime, laser_queue, stop_event, worker_cpu):
 
             objects = list(latest_payload.get("laser_objects", []))
             is_danger = bool(latest_payload.get("is_danger", False))
+            if now - _marker_state_ts > 0.1:
+                _marker_state_cache = cp.load_marker_state(ict_root)
+                _marker_state_ts = now
+            marker_state = _marker_state_cache
+            # 外推状态清理：无论有无候选目标都执行，避免无候选帧时长期滞留
+            stale = [k for k, (_, _, ts) in _extrap_state.items() if now - ts > 5.0]
+            for k in stale:
+                del _extrap_state[k]
+            selected_track_id = marker_state.get("selected_track_id")
+            preferred_track_ids = locked_track_ids
+            if selected_track_id is not None:
+                preferred_track_ids = {int(selected_track_id)}
+            eligible_objects = [o for o in objects if _resolve_marker_style(marker_state, o)[0]]
             current_candidates = um.select_laser_targets(
-                objects,
+                eligible_objects,
                 min_score=args.laser_min_score,
                 max_targets=args.max_laser_targets,
                 allowed_classes=args.laser_target_classes,
-                preferred_track_ids=locked_track_ids,
+                preferred_track_ids=preferred_track_ids,
             )
 
             laser_marked = False
@@ -640,6 +721,26 @@ def laser_worker(args, runtime, laser_queue, stop_event, worker_cpu):
                     obj = current_candidates[0]
                     target_track_id = obj["track_id"]
                     target_box = um.expand_box(obj["box"], args.laser_box_scale)
+
+                    # 坐标外推：补偿推理延迟导致的目标位置滞后
+                    detect_ts = latest_payload.get("detect_ts", now)
+                    cx = (target_box[0] + target_box[2]) / 2.0
+                    cy = (target_box[1] + target_box[3]) / 2.0
+                    if target_track_id in _extrap_state:
+                        prev_cx, prev_cy, prev_ts = _extrap_state[target_track_id]
+                        dt_detect = detect_ts - prev_ts
+                        if 0 < dt_detect < 0.5:
+                            vx = (cx - prev_cx) / dt_detect
+                            vy = (cy - prev_cy) / dt_detect
+                            if abs(vx) <= 600 and abs(vy) <= 600:
+                                dt_lag = max(0.0, now - detect_ts)
+                                sx, sy = vx * dt_lag, vy * dt_lag
+                                target_box = [
+                                    target_box[0] + sx, target_box[1] + sy,
+                                    target_box[2] + sx, target_box[3] + sy,
+                                ]
+                    _extrap_state[target_track_id] = (cx, cy, detect_ts)
+
                     if last_laser_box is not None and last_laser_track_id == target_track_id:
                         target_box = um.smooth_box(last_laser_box, target_box, args.laser_smoothing_alpha)
 
@@ -658,15 +759,16 @@ def laser_worker(args, runtime, laser_queue, stop_event, worker_cpu):
                     if needs_refresh:
                         try:
                             galvo.task_index = 0
-                            galvo.draw_box(
+                            _, effective_marker_style = _resolve_marker_style(marker_state, obj)
+                            galvo.begin_batch()
+                            emit_marker_command(
+                                galvo,
+                                effective_marker_style,
                                 target_box,
-                                pixel_coords=True,
-                                task_index=0,
-                                image_width=FRAME_WIDTH,
-                                image_height=FRAME_HEIGHT,
-                                steps_per_edge=15,
+                                frame_width=FRAME_WIDTH,
+                                frame_height=FRAME_HEIGHT,
                             )
-                            galvo.update_tasks()
+                            galvo.update_tasks()  # 批量刷新：cmd + U; 合并单次写入
                             laser_marked = True
                             laser_active = True
                             locked_track_ids = {target_track_id}
@@ -701,17 +803,29 @@ def laser_worker(args, runtime, laser_queue, stop_event, worker_cpu):
             pass
 
 
+def _safe_write_bytes(path: Path, data: bytes):
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "wb") as f:
+        f.write(data)
+    os.replace(tmp, path)
+
+
 def writer_worker(
     color_name: str,
     annotated_name: str,
     overlay_name: str,
     frame_seq,
+    detect_seq,
+    detect_ready_event,
     runtime,
     names,
     writer_queue,
     stop_event,
     writer_fps: float,
     worker_cpu,
+    write_debug_assets: bool,
+    config_snapshot: dict,
+    ws_port: int = 8003,
 ):
     apply_worker_cpu_affinity("writer", worker_cpu)
     color_shm, color_buf = attach_shared_buffer(color_name, COLOR_SHAPE, np.uint8)
@@ -720,29 +834,79 @@ def writer_worker(
 
     web_dir = Path.home() / "ICT" / "webui_http_unified"
     web_dir.mkdir(parents=True, exist_ok=True)
+    webui_artifacts = build_webui_artifact_plan(write_debug_assets)
+    um.cleanup_optional_webui_artifacts(web_dir, webui_artifacts)
+    ict_root = Path.home() / "ICT"
+
+    # --- DVPP + WebSocket encoder init (three-tier graceful degradation) ---
+    jpege = venc = broadcaster = None
+    try:
+        import acl as _acl
+        _acl.init()
+        _acl.rt.set_device(0)
+        _acl.rt.create_context(0)
+    except Exception:
+        pass
+    try:
+        from dvpp_stream import DvppJpegEncoder
+        jpege = DvppJpegEncoder(FRAME_WIDTH, FRAME_HEIGHT)
+        print("[writer] DVPP JPEGE encoder ready", flush=True)
+    except Exception as e:
+        print(f"[writer] DVPP JPEGE unavailable, fallback cv2: {e}", flush=True)
+    try:
+        from dvpp_stream import VencStreamEncoder
+        venc = VencStreamEncoder(FRAME_WIDTH, FRAME_HEIGHT)
+        print("[writer] VENC H.264 encoder ready", flush=True)
+    except Exception as e:
+        print(f"[writer] VENC H.264 unavailable: {e}", flush=True)
+    try:
+        from dvpp_stream import WebSocketBroadcaster
+        broadcaster = WebSocketBroadcaster(
+            width=FRAME_WIDTH, height=FRAME_HEIGHT,
+            fps=int(max(writer_fps, 1)), port=ws_port,
+        )
+        broadcaster.set_codec("h264" if venc else "mjpeg")
+        broadcaster.start()
+        print(f"[writer] WebSocket broadcaster on port {ws_port} (codec={'h264' if venc else 'mjpeg'})", flush=True)
+    except Exception as e:
+        print(f"[writer] WebSocket broadcaster unavailable: {e}", flush=True)
 
     min_interval = 1.0 / max(writer_fps, 1.0)
     next_write_time = 0.0
     latest_snapshot = build_default_detection_snapshot()
+    last_written_detect_seq = -1
 
     try:
         while not stop_event.is_set():
-            timeout = 0.1 if next_write_time == 0.0 else max(0.01, next_write_time - time.time())
-            try:
-                latest_snapshot = writer_queue.get(timeout=timeout)
-                latest_snapshot, _ = drain_latest_message(writer_queue, latest_snapshot)
-            except queue.Empty:
-                pass
-
-            if next_write_time and time.time() < next_write_time:
+            remaining = max(0.001, next_write_time - time.time()) if next_write_time else 0.1
+            woke = detect_ready_event.wait(timeout=remaining)
+            if woke:
+                detect_ready_event.clear()
+            now = time.time()
+            if next_write_time and now < next_write_time:
                 continue
 
-            raw_frame = color_buf.copy()
+            current_detect_seq = detect_seq.value
+            if current_detect_seq == last_written_detect_seq:
+                continue
+
+            latest_snapshot, _ = drain_latest_message(writer_queue, latest_snapshot)
+
+            raw_frame = color_buf.copy() if write_debug_assets else None
             annotated = annotated_buf.copy()
-            overlay = overlay_buf.copy()
-            cv2.imwrite(str(web_dir / "frame.jpg"), annotated, [cv2.IMWRITE_JPEG_QUALITY, 75])
-            cv2.imwrite(str(web_dir / "debug_frame.jpg"), raw_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-            cv2.imwrite(str(web_dir / "debug_overlay.png"), overlay, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+            jpeg_bytes = None
+            if jpege:
+                try:
+                    jpeg_bytes = jpege.encode(annotated)
+                    _safe_write_bytes(web_dir / "frame.jpg", jpeg_bytes)
+                except Exception:
+                    jpeg_bytes = None
+            if jpeg_bytes is None:
+                cv2.imwrite(str(web_dir / "frame.jpg"), annotated, [cv2.IMWRITE_JPEG_QUALITY, 75])
+            if write_debug_assets and raw_frame is not None:
+                overlay = overlay_buf.copy()
+                cv2.imwrite(str(web_dir / "debug_frame.jpg"), raw_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                cv2.imwrite(str(web_dir / "debug_overlay.png"), overlay, [cv2.IMWRITE_PNG_COMPRESSION, 1])
             state_payload = {
                 "names": list(names),
                 **latest_snapshot,
@@ -755,10 +919,15 @@ def writer_worker(
                 "camera_serial": read_text_slot(runtime.camera_serial),
                 "depth_scale": float(get_shared_value(runtime.depth_scale)),
                 "capture_seq": int(frame_seq.value),
+                "detect_seq": current_detect_seq,
                 "hand_backend": read_text_slot(runtime.hand_backend),
                 "camera_fps": float(get_shared_value(runtime.camera_fps)),
                 "worker_cpu_map": read_json_slot(runtime.worker_cpu_map, {}),
                 "worker_pids": read_json_slot(runtime.worker_pids, {}),
+                "write_debug_assets": bool(write_debug_assets),
+                "homography_matrix": read_json_slot(runtime.homography_matrix, None),
+                "config": dict(config_snapshot),
+                "marker_state": cp.load_marker_state(ict_root),
             }
             fatal_error = read_text_slot(runtime.fatal_error)
             if fatal_error:
@@ -768,8 +937,30 @@ def writer_worker(
                 state_payload["laser_error"] = laser_error
             with open(web_dir / "state.json", "w", encoding="utf-8") as handle:
                 json.dump(state_payload, handle)
-            next_write_time = time.time() + min_interval
+            state_json_str = json.dumps(state_payload) if broadcaster else None
+
+            # --- WebSocket broadcast ---
+            if broadcaster:
+                if venc:
+                    try:
+                        h264 = venc.encode(annotated)
+                        if h264:
+                            broadcaster.broadcast_binary(h264)
+                    except Exception:
+                        pass
+                elif jpeg_bytes is not None:
+                    broadcaster.broadcast_binary(jpeg_bytes)
+                broadcaster.broadcast_text(state_json_str)
+
+            last_written_detect_seq = current_detect_seq
+            next_write_time = now + min_interval
     finally:
+        if broadcaster:
+            broadcaster.stop()
+        if venc:
+            venc.close()
+        if jpege:
+            jpege.close()
         color_shm.close()
         annotated_shm.close()
         overlay_shm.close()
@@ -777,7 +968,8 @@ def writer_worker(
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = um.build_arg_parser()
-    parser.add_argument("--writer-fps", type=float, default=10.0, help="WebUI 写图与状态输出频率")
+    parser.add_argument("--writer-fps", type=float, default=30.0, help="WebUI 写图与状态输出频率")
+    parser.add_argument("--ws-port", type=int, default=8003, help="WebSocket 推流端口")
     parser.add_argument("--cpu-affinity", choices=("auto", "off"), default="auto", help="Linux 下自动为采集/检测/写盘/激光分配 CPU 核")
     return parser
 
@@ -792,6 +984,7 @@ def main() -> None:
     frame_ready_event = ctx.Event()
     frame_seq = ctx.Value("i", 0)
     detect_seq = ctx.Value("i", 0)
+    detect_ready_event = ctx.Event()
     writer_queue = ctx.Queue(maxsize=1)
     laser_queue = ctx.Queue(maxsize=1)
 
@@ -800,6 +993,29 @@ def main() -> None:
     names = list(data_cfg.get("names", []))
     runtime = create_runtime_shared_state(ctx, laser_enabled=bool(args.enable_laser))
     write_text_slot(runtime.hand_backend, "pending")
+    config_snapshot = {
+        "danger_distance": args.danger_distance,
+        "conf_thres": args.conf_thres,
+        "yolo_model": str(Path(args.yolo_model).name),
+        "pose_model": str(args.pose_model or ""),
+        "data_yaml": str(args.data_yaml),
+        "camera_serial": str(args.camera_serial or ""),
+        "enable_laser": bool(args.enable_laser),
+        "laser_serial": str(args.laser_serial),
+        "laser_baudrate": int(args.laser_baudrate),
+        "laser_calibration": str(args.laser_calibration or ""),
+    }
+
+    # Load calibration matrix for WebUI
+    if args.laser_calibration and Path(args.laser_calibration).exists():
+        import yaml
+        try:
+            with open(args.laser_calibration, "r") as f:
+                calib_data = yaml.safe_load(f)
+                if "homography_matrix" in calib_data:
+                    write_json_slot(runtime.homography_matrix, calib_data["homography_matrix"])
+        except Exception as e:
+            print(f"警告: 加载 WebUI 标定矩阵失败: {e}", flush=True)
 
     color_shm = create_shared_buffer(COLOR_SHAPE, np.uint8)
     depth_shm = create_shared_buffer(DEPTH_SHAPE, np.uint16)
@@ -815,7 +1031,7 @@ def main() -> None:
         ctx.Process(
             target=capture_worker,
             name="camera_capture",
-            args=(color_shm.name, depth_shm.name, frame_seq, runtime, frame_ready_event, stop_event, cpu_plan["camera_capture"]),
+            args=(color_shm.name, depth_shm.name, frame_seq, runtime, frame_ready_event, stop_event, cpu_plan["camera_capture"], args.camera_serial),
         ),
         ctx.Process(
             target=detection_worker,
@@ -834,6 +1050,7 @@ def main() -> None:
                 laser_queue,
                 frame_ready_event,
                 stop_event,
+                detect_ready_event,
                 cpu_plan["detector"],
             ),
         ),
@@ -845,12 +1062,17 @@ def main() -> None:
                 annotated_shm.name,
                 overlay_shm.name,
                 frame_seq,
+                detect_seq,
+                detect_ready_event,
                 runtime,
                 names,
                 writer_queue,
                 stop_event,
                 args.writer_fps,
                 cpu_plan["writer"],
+                args.write_debug_assets,
+                config_snapshot,
+                args.ws_port,
             ),
         ),
         ctx.Process(
@@ -879,6 +1101,7 @@ def main() -> None:
     finally:
         stop_event.set()
         frame_ready_event.set()
+        detect_ready_event.set()
         for process in processes:
             process.join(timeout=5.0)
         for process in processes:

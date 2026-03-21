@@ -358,12 +358,10 @@ class GalvoCalibrator:
         galvo_pts = np.array(galvo_points, dtype=np.float32)
         pixel_pts = np.array(source_points, dtype=np.float32)
 
-        homography, mask = cv2.findHomography(
-            pixel_pts,
-            galvo_pts,
-            cv2.RANSAC,
-            float(self.detector_profile["ransac_reproj_threshold"]),
-        )
+        # 当前正式标定目标是 pixel -> galvo 的 2D 视角映射关系。
+        # 每个点在进入这里之前已经经过多帧稳健聚合，因此优先使用全部稳定点做拟合，
+        # 避免目的坐标单位过大时，RANSAC 阈值过小把好点误判为外点。
+        homography, mask = cv2.findHomography(pixel_pts, galvo_pts, 0)
         if homography is None:
             self.last_failure_reason = "单应性矩阵计算失败"
             return False
@@ -372,7 +370,7 @@ class GalvoCalibrator:
         errors = np.linalg.norm(pred - galvo_pts, axis=1)
 
         valid_points = len(galvo_pts)
-        inlier_points = int(mask.sum()) if mask is not None else valid_points
+        inlier_points = valid_points
         mean_error = float(np.mean(errors))
         max_error = float(np.max(errors))
         error_p95 = float(np.percentile(errors, 95))

@@ -6,23 +6,46 @@
 #   2. 带激光:   ./start_unified_with_laser.sh --enable-laser
 
 set -euo pipefail
+export PYTHONPATH="$HOME/ICT/pybind_venc/build${PYTHONPATH:+:$PYTHONPATH}"
 
 # 基础路径（相对脚本自动解析，避免依赖固定 ~/ICT）
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ICT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+BOARD_MODEL_DIR="/home/HwHiAiUser/ICT/d435_project/projects/yolo26_galvo/models"
+CONTROL_PLANE="$ICT_DIR/edge/unified_app/control_plane.py"
+
+find_preferred_yolo_model() {
+    local candidate=""
+    if [ -d "$BOARD_MODEL_DIR" ]; then
+        for pattern in "*yolo26n*.om" "*yolo26n*.mindir" "*yolom*.om" "*yolo26m*.om" "*yolom*.mindir" "*yolo26m*.mindir"; do
+            candidate=$(find "$BOARD_MODEL_DIR" -maxdepth 2 -type f -iname "$pattern" 2>/dev/null | sort | head -n 1)
+            if [ -n "$candidate" ]; then
+                printf '%s\n' "$candidate"
+                return 0
+            fi
+        done
+    fi
+    printf '%s\n' "$ICT_DIR/models/route_a_yolo26/yolo26n_aug_full_8419_gpu.om"
+}
+
+if [ -f "$CONTROL_PLANE" ]; then
+    # 通过 control_plane.py shell-env 注入统一控制配置。
+    eval "$(python3 "$ICT_DIR/edge/unified_app/control_plane.py" shell-env "$ICT_DIR")"
+fi
 
 # 模型和配置（允许通过环境变量覆盖）
-YOLO_MODEL="${YOLO_MODEL:-$ICT_DIR/models/route_a_yolo26/yolo26n_aug_full_8419_gpu.om}"
-POSE_MODEL="${POSE_MODEL:-$ICT_DIR/yolov8n_pose_aipp.om}"
-DATA_YAML="${DATA_YAML:-$ICT_DIR/config/yolo26_6cls.yaml}"
+YOLO_MODEL="${YOLO_MODEL:-${CONTROL_YOLO_MODEL:-$(find_preferred_yolo_model)}}"
+POSE_MODEL="${POSE_MODEL:-${CONTROL_POSE_MODEL:-$ICT_DIR/yolov8n_pose_aipp.om}}"
+DATA_YAML="${DATA_YAML:-${CONTROL_DATA_YAML:-$ICT_DIR/config/yolo26_6cls.yaml}}"
+CAMERA_SERIAL="${CAMERA_SERIAL:-${CONTROL_CAMERA_SERIAL:-}}"
 
 # 参数（允许通过环境变量覆盖）
-DANGER_DISTANCE="${DANGER_DISTANCE:-300}"
-CONF_THRES="${CONF_THRES:-0.55}"
+DANGER_DISTANCE="${DANGER_DISTANCE:-${CONTROL_DANGER_DISTANCE:-300}}"
+CONF_THRES="${CONF_THRES:-${CONTROL_CONF_THRES:-0.55}}"
 YOLO_DEVICE="${YOLO_DEVICE:-cpu}"
-LASER_SERIAL="${LASER_SERIAL:-/dev/ttyUSB0}"
-LASER_BAUDRATE="${LASER_BAUDRATE:-115200}"
-LASER_CALIBRATION="${LASER_CALIBRATION:-$ICT_DIR/edge/laser_galvo/galvo_calibration.yaml}"
+LASER_SERIAL="${LASER_SERIAL:-${CONTROL_LASER_SERIAL:-/dev/ttyUSB0}}"
+LASER_BAUDRATE="${LASER_BAUDRATE:-${CONTROL_LASER_BAUDRATE:-115200}}"
+LASER_CALIBRATION="${LASER_CALIBRATION:-${CONTROL_LASER_CALIBRATION:-$ICT_DIR/edge/laser_galvo/galvo_calibration.yaml}}"
 
 echo "=========================================="
 echo "统一检测监控 - 物体 + 手部 + 激光标记"
@@ -51,6 +74,10 @@ CMD=(
     --conf-thres "$CONF_THRES"
 )
 
+if [ -n "$CAMERA_SERIAL" ]; then
+    CMD+=(--camera-serial "$CAMERA_SERIAL")
+fi
+
 if [ -f "$POSE_MODEL" ]; then
     CMD+=(--pose-model "$POSE_MODEL")
     echo "手部模型: 使用 YOLO pose ($POSE_MODEL)"
@@ -59,7 +86,12 @@ else
 fi
 
 # 检查是否启用激光
-if [[ " $* " == *" --enable-laser "* ]]; then
+LASER_ENABLED_FLAG=0
+if [[ " $* " == *" --enable-laser "* ]] || [[ "$ENABLE_LASER" == "1" ]]; then
+    LASER_ENABLED_FLAG=1
+fi
+
+if [[ "$LASER_ENABLED_FLAG" == "1" ]]; then
     echo "激光振镜: 启用"
     echo "  串口: $LASER_SERIAL"
     echo "  波特率: $LASER_BAUDRATE"
