@@ -1,61 +1,133 @@
-"""Qwen3 chat service — thin wrapper around llama.cpp server (CANN backend)."""
-import re
-import json
-import logging
-import urllib.request
-import urllib.error
+"""Qwen3-0.6B chat service on Ascend 310B1 via .om + ACL.
 
-log = logging.getLogger(__name__)
+Uses prefill-only model (no KV cache). Each generation step re-runs
+the full sequence through the model (O(n^2) but simple).
+"""
+import re, time, sys
+import numpy as np
+from pathlib import Path
 
-SYSTEM_PROMPT = "You are a helpful assistant. /no_think"
+DEFAULT_OM   = str(Path.home() / "ICT/models/qwen3_0.6b_seq512.om")
+DEFAULT_TOK  = str(Path.home() / "ICT/models/qwen3-0.6b")
 
-DEFAULT_BASE_URL = "http://127.0.0.1:8080"
+
+def _sample_top_p(logits: np.ndarray, temperature: float = 0.7,
+                   top_p: float = 0.9) -> int:
+    if temperature <= 0:
+        return int(np.argmax(logits))
+    logits = logits / temperature
+    logits -= logits.max()
+    probs = np.exp(logits) / np.exp(logits).sum()
+    sorted_idx = np.argsort(probs)[::-1]
+    cum = np.cumsum(probs[sorted_idx])
+    cutoff = np.searchsorted(cum, top_p) + 1
+    candidates = sorted_idx[:cutoff]
+    p = probs[candidates]
+    p /= p.sum()
+    return int(np.random.choice(candidates, p=p))
 
 
 class ChatSession:
-    """Stateful multi-turn chat session backed by a llama.cpp /v1/chat/completions endpoint."""
+    """Manages a multi-turn chat with Qwen3-0.6B .om backend."""
 
-    def __init__(self, base_url: str = DEFAULT_BASE_URL,
-                 max_tokens: int = 256,
-                 temperature: float = 0.6,
-                 top_p: float = 0.95):
-        self.base_url = base_url.rstrip("/")
-        self.max_tokens = max_tokens
+    SYSTEM_PROMPT = "You are a helpful assistant. /no_think"
+    ROLE_MAP = {"system": "system", "user": "user", "assistant": "assistant"}
+
+    def __init__(self, om_path: str = DEFAULT_OM, tok_dir: str = DEFAULT_TOK,
+                 max_new_tokens: int = 128, temperature: float = 0.7,
+                 top_p: float = 0.9):
+        from transformers import AutoTokenizer
+        self.tok = AutoTokenizer.from_pretrained(tok_dir, trust_remote_code=True)
+
+        from acl_backend import OmModel
+        self.model = OmModel(om_path)
+        self.max_seq = self.model.seq_len
+        self.max_new = max_new_tokens
         self.temperature = temperature
         self.top_p = top_p
-        self.history: list[dict] = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+
+        self.messages: list[dict] = [
+            {"role": "system", "content": self.SYSTEM_PROMPT}
         ]
+        self.eos_ids = set()
+        for name in ("eos_token_id",):
+            v = getattr(self.tok, name, None)
+            if isinstance(v, int):
+                self.eos_ids.add(v)
+            elif isinstance(v, (list, tuple)):
+                self.eos_ids.update(v)
+        if not self.eos_ids:
+            self.eos_ids = {151643, 151645}  # Qwen3 default
+
+    def _build_prompt_ids(self, messages: list[dict]) -> list[int]:
+        text = self.tok.apply_chat_template(messages, tokenize=False,
+                                             add_generation_prompt=True)
+        return self.tok.encode(text)
 
     def generate(self, user_msg: str) -> str:
-        """Send *user_msg*, return assistant reply (think-tags stripped)."""
-        self.history.append({"role": "user", "content": user_msg})
+        self.messages.append({"role": "user", "content": user_msg})
+        prompt_ids = self._build_prompt_ids(self.messages)
 
-        payload = json.dumps({
-            "messages": self.history,
-            "max_tokens": self.max_tokens,
-            "temperature": self.temperature,
-            "top_p": self.top_p,
-        }).encode()
+        if len(prompt_ids) > self.max_seq - 4:
+            prompt_ids = prompt_ids[-(self.max_seq - 4):]
 
-        req = urllib.request.Request(
-            f"{self.base_url}/v1/chat/completions",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                body = json.loads(resp.read())
-        except urllib.error.URLError as exc:
-            log.error("llama.cpp server unreachable: %s", exc)
-            raise
+        generated: list[int] = []
+        t0 = time.time()
 
-        reply = body["choices"][0]["message"]["content"]
+        for _ in range(self.max_new):
+            all_ids = prompt_ids + generated
+            if len(all_ids) >= self.max_seq:
+                break
+
+            logits = self.model.forward(all_ids)
+            next_logits = logits[-1]
+            tok_id = _sample_top_p(next_logits, self.temperature, self.top_p)
+
+            if tok_id in self.eos_ids:
+                break
+            generated.append(tok_id)
+
+        elapsed = time.time() - t0
+        n = len(generated)
+        speed = n / elapsed if elapsed > 0 else 0
+
+        reply = self.tok.decode(generated, skip_special_tokens=True)
         reply = re.sub(r"<think>.*?</think>", "", reply, flags=re.DOTALL).strip()
+        self.messages.append({"role": "assistant", "content": reply})
+        return reply, n, speed
 
-        self.history.append({"role": "assistant", "content": reply})
-        return reply
+    def close(self):
+        self.model.close()
 
-    def reset(self) -> None:
-        """Clear conversation history, keep system prompt."""
-        self.history = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+def main():
+    import argparse
+    p = argparse.ArgumentParser(description="Qwen3-0.6B CLI chat on Ascend 310B1")
+    p.add_argument("--om", default=DEFAULT_OM)
+    p.add_argument("--tok", default=DEFAULT_TOK)
+    p.add_argument("--max-tokens", type=int, default=128)
+    p.add_argument("--temperature", type=float, default=0.7)
+    p.add_argument("--greedy", action="store_true")
+    args = p.parse_args()
+
+    temp = 0.0 if args.greedy else args.temperature
+    session = ChatSession(args.om, args.tok, args.max_tokens, temp)
+
+    print(f"Qwen3-0.6B on NPU (seq_len={session.max_seq}). Type 'quit' to exit.\n")
+    try:
+        while True:
+            user = input("You: ").strip()
+            if not user or user.lower() in ("quit", "exit", "q"):
+                break
+            reply, n_tok, speed = session.generate(user)
+            print(f"Bot: {reply}")
+            print(f"  [{n_tok} tokens, {speed:.1f} tok/s]\n")
+    except (KeyboardInterrupt, EOFError):
+        pass
+    finally:
+        session.close()
+        print("\nBye.")
+
+
+if __name__ == "__main__":
+    main()
