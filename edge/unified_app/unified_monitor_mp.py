@@ -149,6 +149,7 @@ def emit_marker_command(galvo, style: str, box: Sequence[float], *, frame_width:
         center_y = (y1 + y2) / 2.0
         radius_px = max(1.0, max(abs(x2 - x1), abs(y2 - y1)) / 2.0)
         gx, gy = galvo.pixel_to_galvo(center_x, center_y, frame_width, frame_height)
+        # 像素半径→振镜坐标半径：32768/320 ≈ 102.4（半轴满幅/半画面宽度）
         radius = int(max(1.0, radius_px * 102.4))
         return galvo.draw_circle(gx, gy, radius, task_index=0)
     return galvo.draw_box(

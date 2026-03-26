@@ -470,16 +470,16 @@ class WebSocketBroadcaster:
             self._clients = [c for c in self._clients if c.alive]
 
     def _broadcast(self, frame: bytes):
-        dead = []
+        alive = []
         for client in self._clients:
             if not client.alive:
-                dead.append(client)
                 continue
+            alive.append(client)
             loop = self._loop
             if loop and loop.is_running():
                 asyncio.run_coroutine_threadsafe(client.send(frame), loop)
-        if dead:
-            self._clients = [c for c in self._clients if c.alive]
+        if len(alive) != len(self._clients):
+            self._clients = alive
 
     def broadcast_binary(self, data: bytes):
         self._broadcast(_ws_encode_frame(0x02, data))

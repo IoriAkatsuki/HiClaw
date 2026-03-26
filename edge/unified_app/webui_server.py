@@ -39,7 +39,6 @@ import control_plane as cp  # noqa: E402
 
 
 _calib_proc: dict = {
-    "pid": None,
     "log_path": "",
     "proc": None,
     "exit_code": None,
@@ -218,7 +217,6 @@ def _start_calibration(serial_port: str, baudrate: int, output_path: str) -> dic
     with _calib_lock:
         _calib_proc.update(
             {
-                "pid": proc.pid,
                 "log_path": log_path,
                 "proc": proc,
                 "exit_code": None,
