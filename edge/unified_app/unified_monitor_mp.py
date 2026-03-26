@@ -14,10 +14,12 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import importlib
 import json
 import multiprocessing as mp
 import os
 import queue
+import signal
 import sys
 import time
 from multiprocessing import shared_memory
@@ -31,8 +33,10 @@ import numpy as np
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
+LASER_GALVO_DIR = Path(__file__).resolve().parents[1] / "laser_galvo"
+if str(LASER_GALVO_DIR) not in sys.path:
+    sys.path.insert(0, str(LASER_GALVO_DIR))
 
-import unified_monitor as um  # noqa: E402
 import control_plane as cp  # noqa: E402
 
 
@@ -42,10 +46,100 @@ COLOR_SHAPE = (FRAME_HEIGHT, FRAME_WIDTH, 3)
 DEPTH_SHAPE = (FRAME_HEIGHT, FRAME_WIDTH)
 OVERLAY_SHAPE = (FRAME_HEIGHT, FRAME_WIDTH, 4)
 TEXT_SLOT_SIZE = 4096
+_UM_MODULE = None
 
 
 def build_webui_artifact_plan(write_debug_assets: bool) -> Tuple[str, ...]:
-    return um.build_webui_artifact_plan(write_debug_assets)
+    return _get_um_module().build_webui_artifact_plan(write_debug_assets)
+
+
+def _get_um_module():
+    global _UM_MODULE
+    if _UM_MODULE is None:
+        _UM_MODULE = importlib.import_module("unified_monitor")
+    return _UM_MODULE
+
+
+def select_mp_start_method() -> str:
+    methods = list(mp.get_all_start_methods())
+    requested = os.environ.get("ICT_MP_START_METHOD", "").strip()
+    if requested:
+        if requested not in methods:
+            raise ValueError(f"ICT_MP_START_METHOD 不受支持: {requested}")
+        return requested
+    if "spawn" in methods:
+        return "spawn"
+    return mp.get_start_method()
+
+
+def h264_stream_enabled() -> bool:
+    return os.environ.get("ICT_ENABLE_H264_STREAM", "").strip() == "1"
+
+
+def should_enable_depth_pipeline(args) -> bool:
+    return (not bool(getattr(args, "disable_hand", False))) and (not bool(getattr(args, "disable_distance", False)))
+
+
+def init_h264_stream_encoder(
+    width: int,
+    height: int,
+    fps: float,
+    *,
+    stream_module=None,
+):
+    if stream_module is None:
+        import dvpp_stream as stream_module
+
+    try:
+        encoder = stream_module.VencStreamEncoder(width, height)
+        print("[writer] VENC H.264 encoder ready", flush=True)
+        return encoder, "venc"
+    except Exception as exc:
+        print(f"[writer] VENC H.264 unavailable: {exc}", flush=True)
+
+    enable_ffmpeg_fallback = os.environ.get("ICT_ENABLE_FFMPEG_H264_FALLBACK", "").strip() == "1"
+    if not enable_ffmpeg_fallback:
+        print("[writer] ffmpeg H.264 fallback disabled, using MJPEG for lower preview latency", flush=True)
+        return None, "mjpeg"
+
+    try:
+        encoder = stream_module.FfmpegH264Encoder(width, height, int(max(fps, 1)))
+        print("[writer] ffmpeg H.264 fallback ready", flush=True)
+        return encoder, "ffmpeg"
+    except Exception as exc:
+        print(f"[writer] ffmpeg H.264 fallback unavailable: {exc}", flush=True)
+
+    return None, "mjpeg"
+
+
+def install_stop_signal_handlers(stop_event):
+    previous = {}
+
+    def _handle(signum, _frame):
+        print(f"[MP] received signal {signum}, stopping...", flush=True)
+        stop_event.set()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        previous[sig] = signal.getsignal(sig)
+        signal.signal(sig, _handle)
+    return previous
+
+
+def restore_signal_handlers(previous_handlers) -> None:
+    for sig, handler in (previous_handlers or {}).items():
+        signal.signal(sig, handler)
+
+
+def resolve_camera_serial(devices, rs_module, preferred_serial: str = "") -> str:
+    preferred = (preferred_serial or "").strip()
+    available = [dev.get_info(rs_module.camera_info.serial_number) for dev in devices]
+    if not available:
+        raise RuntimeError("未找到 RealSense 设备")
+    if preferred:
+        if preferred not in available:
+            raise RuntimeError(f"指定相机序列号不存在: {preferred}")
+        return preferred
+    return available[0]
 
 
 def emit_marker_command(galvo, style: str, box: Sequence[float], *, frame_width: int, frame_height: int) -> bool:
@@ -261,6 +355,65 @@ def drain_latest_message(source_queue, latest_payload=None):
             return latest_payload, updated
 
 
+def plan_writer_publish(
+    *,
+    now: float,
+    next_write_time: float,
+    current_detect_seq: int,
+    last_snapshot_detect_seq: int,
+) -> dict:
+    if next_write_time and now < next_write_time:
+        return {"emit_frame": False, "refresh_snapshot": False}
+    return {
+        "emit_frame": True,
+        "refresh_snapshot": current_detect_seq != last_snapshot_detect_seq,
+    }
+
+
+def _snapshot_objects_for_draw(snapshot: dict) -> Tuple[List[dict], Set[int]]:
+    objects: List[dict] = []
+    highlighted_ids: Set[int] = set()
+    for raw in snapshot.get("object_details") or []:
+        box = raw.get("box")
+        if not isinstance(box, (list, tuple)) or len(box) != 4:
+            continue
+        track_id = int(raw.get("track_id", -1))
+        obj = {
+            "box": [int(round(v)) for v in box],
+            "name": str(raw.get("name", "cls")),
+            "score": float(raw.get("score", 0.0)),
+            "track_id": track_id,
+        }
+        objects.append(obj)
+        if raw.get("locked"):
+            highlighted_ids.add(track_id)
+    return objects, highlighted_ids
+
+
+def render_live_frame_from_snapshot(frame: np.ndarray, snapshot: dict) -> np.ndarray:
+    annotated = np.ascontiguousarray(frame.copy())
+    objects, highlighted_ids = _snapshot_objects_for_draw(snapshot)
+    if objects:
+        _get_um_module().draw_object_annotations(
+            annotated,
+            objects,
+            highlighted_track_ids=highlighted_ids,
+        )
+    if snapshot.get("is_danger"):
+        danger_obj = str(snapshot.get("danger_object") or "").strip()
+        text = f"DANGER {danger_obj}" if danger_obj else "DANGER"
+        cv2.putText(
+            annotated,
+            text,
+            (30, 40),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.9,
+            (0, 0, 255),
+            3,
+        )
+    return annotated
+
+
 def build_default_detection_snapshot() -> dict:
     return {
         "fps": 0.0,
@@ -314,7 +467,16 @@ class DepthFrameProxy:
         return float(self.depth_map[y, x]) * self.depth_scale
 
 
-def capture_worker(color_name: str, depth_name: str, frame_seq, runtime, frame_ready_event, stop_event, worker_cpu, preferred_camera_serial: str):
+def capture_worker(
+    color_name: str,
+    depth_name: str,
+    frame_seq,
+    runtime,
+    frame_ready_event,
+    stop_event,
+    worker_cpu,
+    preferred_camera_serial: str | tuple[str, bool],
+):
     import pyrealsense2 as rs
 
     apply_worker_cpu_affinity("camera_capture", worker_cpu)
@@ -329,19 +491,25 @@ def capture_worker(color_name: str, depth_name: str, frame_seq, runtime, frame_r
         write_text_slot(runtime.fatal_error, "未找到 RealSense 设备")
         stop_event.set()
         return
+    enable_depth = True
+    if isinstance(preferred_camera_serial, tuple):
+        preferred_camera_serial, enable_depth = preferred_camera_serial
     try:
-        serial = um.resolve_camera_serial(devices, rs, preferred_camera_serial)
+        serial = resolve_camera_serial(devices, rs, preferred_camera_serial)
     except Exception as exc:
         write_text_slot(runtime.fatal_error, str(exc))
         stop_event.set()
         return
     config.enable_device(serial)
     config.enable_stream(rs.stream.color, FRAME_WIDTH, FRAME_HEIGHT, rs.format.bgr8, 30)
-    config.enable_stream(rs.stream.depth, FRAME_WIDTH, FRAME_HEIGHT, rs.format.z16, 30)
+    if enable_depth:
+        config.enable_stream(rs.stream.depth, FRAME_WIDTH, FRAME_HEIGHT, rs.format.z16, 30)
     profile = pipeline.start(config)
-    align = rs.align(rs.stream.color)
-    depth_sensor = profile.get_device().first_depth_sensor()
-    depth_scale = float(depth_sensor.get_depth_scale())
+    align = rs.align(rs.stream.color) if enable_depth else None
+    depth_scale = 0.0
+    if enable_depth:
+        depth_sensor = profile.get_device().first_depth_sensor()
+        depth_scale = float(depth_sensor.get_depth_scale())
 
     color_sensor = profile.get_device().first_color_sensor()
     color_sensor.set_option(rs.option.enable_auto_exposure, 1)
@@ -354,22 +522,29 @@ def capture_worker(color_name: str, depth_name: str, frame_seq, runtime, frame_r
 
     write_text_slot(runtime.camera_serial, serial)
     set_shared_value(runtime.depth_scale, depth_scale)
+    if not enable_depth:
+        depth_buf.fill(0)
 
     frame_counter = 0
     last_ts = time.time()
     try:
         while not stop_event.is_set():
             frames = pipeline.wait_for_frames()
-            aligned = align.process(frames)
-            color_frame = aligned.get_color_frame()
-            depth_frame = aligned.get_depth_frame()
-            if not color_frame or not depth_frame:
-                continue
-
-            color_np = np.asanyarray(color_frame.get_data())
-            depth_np = np.asanyarray(depth_frame.get_data())
+            if enable_depth:
+                aligned = align.process(frames)
+                color_frame = aligned.get_color_frame()
+                depth_frame = aligned.get_depth_frame()
+                if not color_frame or not depth_frame:
+                    continue
+                color_np = np.asanyarray(color_frame.get_data())
+                depth_np = np.asanyarray(depth_frame.get_data())
+                np.copyto(depth_buf, depth_np)
+            else:
+                color_frame = frames.get_color_frame()
+                if not color_frame:
+                    continue
+                color_np = np.asanyarray(color_frame.get_data())
             np.copyto(color_buf, color_np)
-            np.copyto(depth_buf, depth_np)
             with frame_seq.get_lock():
                 frame_seq.value += 1
             frame_ready_event.set()
@@ -404,6 +579,7 @@ def detection_worker(
     detect_ready_event,
     worker_cpu,
 ):
+    um = _get_um_module()
     apply_worker_cpu_affinity("detector", worker_cpu)
     color_shm, color_buf = attach_shared_buffer(color_name, COLOR_SHAPE, np.uint8)
     depth_shm, depth_buf = attach_shared_buffer(depth_name, DEPTH_SHAPE, np.uint16)
@@ -412,6 +588,8 @@ def detection_worker(
 
     yolo_backend = um.detect_yolo_backend(args.yolo_model)
     needs_acl = yolo_backend == "acl" or args.pose_model is not None
+    distance_detection_enabled = not bool(args.disable_distance)
+    depth_enabled = should_enable_depth_pipeline(args)
 
     res = None
     if needs_acl:
@@ -466,7 +644,7 @@ def detection_worker(
                 continue
 
             frame = color_buf.copy()
-            depth_map = depth_buf.copy()
+            depth_map = depth_buf.copy() if depth_enabled else None
             seq_check = int(frame_seq.value)
             if seq != seq_check:
                 continue
@@ -517,7 +695,7 @@ def detection_worker(
             min_depth_mm = None
             hand_count = 0
             danger_obj = None
-            depth_frame = DepthFrameProxy(depth_map, float(get_shared_value(runtime.depth_scale)))
+            depth_frame = DepthFrameProxy(depth_map, float(get_shared_value(runtime.depth_scale))) if depth_enabled else None
 
             if args.disable_hand:
                 hand_ms = 0.0
@@ -535,18 +713,19 @@ def detection_worker(
                     last_hand_results = pose_results_new
                 hand_results = last_hand_results if last_hand_results is not None else []
                 hand_count = len(hand_results)
-                for person in hand_results:
-                    wrists = um.extract_pose_wrists(person, depth_frame, conf_thres=args.pose_conf_thres)
-                    for wrist in wrists:
-                        wx, wy = wrist["pixel"]
-                        depth_mm = wrist["depth_mm"]
-                        if depth_mm > 0 and (min_depth_mm is None or depth_mm < min_depth_mm):
-                            min_depth_mm = depth_mm
-                        if depth_mm > 0 and depth_mm < args.danger_distance:
-                            is_danger = True
-                            near_obj, obj = um.check_hand_near_objects((wx, wy), depth_mm, objects, args.danger_distance)
-                            if near_obj:
-                                danger_obj = obj
+                if distance_detection_enabled and depth_frame is not None:
+                    for person in hand_results:
+                        wrists = um.extract_pose_wrists(person, depth_frame, conf_thres=args.pose_conf_thres)
+                        for wrist in wrists:
+                            wx, wy = wrist["pixel"]
+                            depth_mm = wrist["depth_mm"]
+                            if depth_mm > 0 and (min_depth_mm is None or depth_mm < min_depth_mm):
+                                min_depth_mm = depth_mm
+                            if depth_mm > 0 and depth_mm < args.danger_distance:
+                                is_danger = True
+                                near_obj, obj = um.check_hand_near_objects((wx, wy), depth_mm, objects, args.danger_distance)
+                                if near_obj:
+                                    danger_obj = obj
             else:
                 should_detect_hand = seq % 3 == 0
                 hand_t0 = time.time()
@@ -561,19 +740,20 @@ def detection_worker(
                 hand_results = last_hand_results
                 if hand_results is not None and hand_results.multi_hand_landmarks:
                     hand_count = len(hand_results.multi_hand_landmarks)
-                    for hand_landmarks in hand_results.multi_hand_landmarks:
-                        wrist = hand_landmarks.landmark[0]
-                        wx, wy = int(wrist.x * w_orig), int(wrist.y * h_orig)
-                        wx = max(0, min(w_orig - 1, wx))
-                        wy = max(0, min(h_orig - 1, wy))
-                        depth_mm = depth_frame.get_distance(wx, wy) * 1000.0
-                        if depth_mm > 0 and (min_depth_mm is None or depth_mm < min_depth_mm):
-                            min_depth_mm = depth_mm
-                        if depth_mm > 0 and depth_mm < args.danger_distance:
-                            is_danger = True
-                            near_obj, obj = um.check_hand_near_objects((wx, wy), depth_mm, objects, args.danger_distance)
-                            if near_obj:
-                                danger_obj = obj
+                    if distance_detection_enabled and depth_frame is not None:
+                        for hand_landmarks in hand_results.multi_hand_landmarks:
+                            wrist = hand_landmarks.landmark[0]
+                            wx, wy = int(wrist.x * w_orig), int(wrist.y * h_orig)
+                            wx = max(0, min(w_orig - 1, wx))
+                            wy = max(0, min(h_orig - 1, wy))
+                            depth_mm = depth_frame.get_distance(wx, wy) * 1000.0
+                            if depth_mm > 0 and (min_depth_mm is None or depth_mm < min_depth_mm):
+                                min_depth_mm = depth_mm
+                            if depth_mm > 0 and depth_mm < args.danger_distance:
+                                is_danger = True
+                                near_obj, obj = um.check_hand_near_objects((wx, wy), depth_mm, objects, args.danger_distance)
+                                if near_obj:
+                                    danger_obj = obj
 
             locked_track_ids = set(read_json_slot(runtime.locked_track_ids, []))
             current_candidates = um.select_laser_targets(
@@ -646,7 +826,8 @@ def laser_worker(args, runtime, laser_queue, stop_event, worker_cpu):
             time.sleep(0.1)
         return
 
-    from edge.laser_galvo.galvo_controller import LaserGalvoController
+    um = _get_um_module()
+    from galvo_controller import LaserGalvoController
 
     galvo = LaserGalvoController(
         serial_port=args.laser_serial,
@@ -827,6 +1008,7 @@ def writer_worker(
     config_snapshot: dict,
     ws_port: int = 8003,
 ):
+    um = _get_um_module()
     apply_worker_cpu_affinity("writer", worker_cpu)
     color_shm, color_buf = attach_shared_buffer(color_name, COLOR_SHAPE, np.uint8)
     annotated_shm, annotated_buf = attach_shared_buffer(annotated_name, COLOR_SHAPE, np.uint8)
@@ -839,7 +1021,7 @@ def writer_worker(
     ict_root = Path.home() / "ICT"
 
     # --- DVPP + WebSocket encoder init (three-tier graceful degradation) ---
-    jpege = venc = broadcaster = None
+    jpege = h264_encoder = broadcaster = None
     try:
         import acl as _acl
         _acl.init()
@@ -853,28 +1035,33 @@ def writer_worker(
         print("[writer] DVPP JPEGE encoder ready", flush=True)
     except Exception as e:
         print(f"[writer] DVPP JPEGE unavailable, fallback cv2: {e}", flush=True)
-    try:
-        from dvpp_stream import VencStreamEncoder
-        venc = VencStreamEncoder(FRAME_WIDTH, FRAME_HEIGHT)
-        print("[writer] VENC H.264 encoder ready", flush=True)
-    except Exception as e:
-        print(f"[writer] VENC H.264 unavailable: {e}", flush=True)
+
+    h264_backend = "disabled"
+    stream_codec = "mjpeg"
+    if h264_stream_enabled():
+        h264_encoder, h264_backend = init_h264_stream_encoder(FRAME_WIDTH, FRAME_HEIGHT, writer_fps)
+        if h264_encoder:
+            stream_codec = "h264"
     try:
         from dvpp_stream import WebSocketBroadcaster
         broadcaster = WebSocketBroadcaster(
             width=FRAME_WIDTH, height=FRAME_HEIGHT,
             fps=int(max(writer_fps, 1)), port=ws_port,
         )
-        broadcaster.set_codec("h264" if venc else "mjpeg")
+        broadcaster.set_codec(stream_codec)
         broadcaster.start()
-        print(f"[writer] WebSocket broadcaster on port {ws_port} (codec={'h264' if venc else 'mjpeg'})", flush=True)
+        print(
+            f"[writer] WebSocket broadcaster on port {ws_port} "
+            f"(codec={stream_codec}, backend={h264_backend})",
+            flush=True,
+        )
     except Exception as e:
         print(f"[writer] WebSocket broadcaster unavailable: {e}", flush=True)
 
     min_interval = 1.0 / max(writer_fps, 1.0)
     next_write_time = 0.0
     latest_snapshot = build_default_detection_snapshot()
-    last_written_detect_seq = -1
+    last_snapshot_detect_seq = -1
 
     try:
         while not stop_event.is_set():
@@ -883,17 +1070,25 @@ def writer_worker(
             if woke:
                 detect_ready_event.clear()
             now = time.time()
-            if next_write_time and now < next_write_time:
+            current_detect_seq = int(detect_seq.value)
+            publish_plan = plan_writer_publish(
+                now=now,
+                next_write_time=next_write_time,
+                current_detect_seq=current_detect_seq,
+                last_snapshot_detect_seq=last_snapshot_detect_seq,
+            )
+            if not publish_plan["emit_frame"]:
                 continue
 
-            current_detect_seq = detect_seq.value
-            if current_detect_seq == last_written_detect_seq:
-                continue
+            if publish_plan["refresh_snapshot"]:
+                latest_snapshot, _ = drain_latest_message(writer_queue, latest_snapshot)
+                last_snapshot_detect_seq = current_detect_seq
 
-            latest_snapshot, _ = drain_latest_message(writer_queue, latest_snapshot)
-
-            raw_frame = color_buf.copy() if write_debug_assets else None
-            annotated = annotated_buf.copy()
+            raw_frame = color_buf.copy()
+            if publish_plan["refresh_snapshot"]:
+                annotated = annotated_buf.copy()
+            else:
+                annotated = render_live_frame_from_snapshot(raw_frame, latest_snapshot)
             jpeg_bytes = None
             if jpege:
                 try:
@@ -941,9 +1136,9 @@ def writer_worker(
 
             # --- WebSocket broadcast ---
             if broadcaster:
-                if venc:
+                if h264_encoder:
                     try:
-                        h264 = venc.encode(annotated)
+                        h264 = h264_encoder.encode(annotated)
                         if h264:
                             broadcaster.broadcast_binary(h264)
                     except Exception:
@@ -952,13 +1147,12 @@ def writer_worker(
                     broadcaster.broadcast_binary(jpeg_bytes)
                 broadcaster.broadcast_text(state_json_str)
 
-            last_written_detect_seq = current_detect_seq
             next_write_time = now + min_interval
     finally:
         if broadcaster:
             broadcaster.stop()
-        if venc:
-            venc.close()
+        if h264_encoder:
+            h264_encoder.close()
         if jpege:
             jpege.close()
         color_shm.close()
@@ -967,8 +1161,8 @@ def writer_worker(
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = um.build_arg_parser()
-    parser.add_argument("--writer-fps", type=float, default=30.0, help="WebUI 写图与状态输出频率")
+    parser = _get_um_module().build_arg_parser()
+    parser.add_argument("--writer-fps", type=float, default=25.0, help="WebUI 写图与状态输出频率")
     parser.add_argument("--ws-port", type=int, default=8003, help="WebSocket 推流端口")
     parser.add_argument("--cpu-affinity", choices=("auto", "off"), default="auto", help="Linux 下自动为采集/检测/写盘/激光分配 CPU 核")
     return parser
@@ -979,7 +1173,9 @@ def main() -> None:
     if args.enable_laser and not Path(args.laser_serial).exists():
         print(f"警告: 串口设备不存在，激光链路将不可用: {args.laser_serial}", flush=True)
 
-    ctx = mp.get_context("fork" if "fork" in mp.get_all_start_methods() else mp.get_start_method())
+    start_method = select_mp_start_method()
+    ctx = mp.get_context(start_method)
+    print(f"[MP] start method: {start_method}", flush=True)
     stop_event = ctx.Event()
     frame_ready_event = ctx.Event()
     frame_seq = ctx.Value("i", 0)
@@ -994,6 +1190,8 @@ def main() -> None:
     runtime = create_runtime_shared_state(ctx, laser_enabled=bool(args.enable_laser))
     write_text_slot(runtime.hand_backend, "pending")
     config_snapshot = {
+        "enable_hand_detection": not bool(args.disable_hand),
+        "enable_distance_detection": not bool(args.disable_distance),
         "danger_distance": args.danger_distance,
         "conf_thres": args.conf_thres,
         "yolo_model": str(Path(args.yolo_model).name),
@@ -1026,12 +1224,22 @@ def main() -> None:
     cpu_plan = plan_worker_cpus(worker_names) if args.cpu_affinity == "auto" else {name: None for name in worker_names}
     write_json_slot(runtime.worker_cpu_map, cpu_plan)
     print(f"[MP] cpu plan: {cpu_plan}", flush=True)
+    depth_enabled = should_enable_depth_pipeline(args)
 
     processes = [
         ctx.Process(
             target=capture_worker,
             name="camera_capture",
-            args=(color_shm.name, depth_shm.name, frame_seq, runtime, frame_ready_event, stop_event, cpu_plan["camera_capture"], args.camera_serial),
+            args=(
+                color_shm.name,
+                depth_shm.name,
+                frame_seq,
+                runtime,
+                frame_ready_event,
+                stop_event,
+                cpu_plan["camera_capture"],
+                (args.camera_serial, depth_enabled),
+            ),
         ),
         ctx.Process(
             target=detection_worker,
@@ -1088,6 +1296,7 @@ def main() -> None:
         pid_map[process.name] = process.pid
         print(f"[MP] started {process.name} pid={process.pid}", flush=True)
     write_json_slot(runtime.worker_pids, pid_map)
+    previous_handlers = install_stop_signal_handlers(stop_event)
 
     try:
         while not stop_event.is_set():
@@ -1121,6 +1330,7 @@ def main() -> None:
                 shm.unlink()
             except Exception:
                 pass
+        restore_signal_handlers(previous_handlers)
 
 
 if __name__ == "__main__":

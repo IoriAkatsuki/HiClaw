@@ -9,11 +9,17 @@ ICT_DIR="$SCRIPT_DIR"
 BOARD_MODEL_DIR="/home/HwHiAiUser/ICT/d435_project/projects/yolo26_galvo/models"
 DEFAULT_YOLO_MODEL="$ICT_DIR/models/route_a_yolo26/yolo26n_aug_full_8419_gpu.om"
 CONTROL_PLANE="$ICT_DIR/edge/unified_app/control_plane.py"
+PYTHON_BIN="${ICT_PYTHON_BIN:-$(command -v python3)}"
+PYTHON_SITE_PACKAGES="$("$PYTHON_BIN" -c 'import site; paths = [site.getusersitepackages(), *site.getsitepackages()]; seen = []; [seen.append(p) for p in paths if p and p not in seen]; print(":".join(seen))' 2>/dev/null || true)"
+
+if [ -n "$PYTHON_SITE_PACKAGES" ]; then
+    export PYTHONPATH="$PYTHON_SITE_PACKAGES${PYTHONPATH:+:$PYTHONPATH}"
+fi
 
 find_preferred_yolo_model() {
     local candidate=""
     if [ -d "$BOARD_MODEL_DIR" ]; then
-        for pattern in "*yolo26n*.om" "*yolo26n*.mindir" "*yolom*.om" "*yolo26m*.om" "*yolom*.mindir" "*yolo26m*.mindir"; do
+        for pattern in "*yolom*.om" "*yolo26m*.om" "*yolom*.mindir" "*yolo26m*.mindir" "*yolo26n*.om" "*yolo26n*.mindir"; do
             candidate=$(find "$BOARD_MODEL_DIR" -maxdepth 2 -type f -iname "$pattern" 2>/dev/null | sort | head -n 1)
             if [ -n "$candidate" ]; then
                 printf '%s\n' "$candidate"
@@ -26,12 +32,14 @@ find_preferred_yolo_model() {
 
 if [ -f "$CONTROL_PLANE" ]; then
     # 通过 control_plane.py shell-env 注入统一控制配置。
-    eval "$(python3 "$ICT_DIR/edge/unified_app/control_plane.py" shell-env "$ICT_DIR")"
+    eval "$("$PYTHON_BIN" "$ICT_DIR/edge/unified_app/control_plane.py" shell-env "$ICT_DIR")"
 fi
 
 YOLO_MODEL="${YOLO_MODEL:-${CONTROL_YOLO_MODEL:-$(find_preferred_yolo_model)}}"
 POSE_MODEL="${POSE_MODEL:-${CONTROL_POSE_MODEL:-$HOME/ICT/yolov8n_pose_aipp.om}}"
 DATA_YAML="${DATA_YAML:-${CONTROL_DATA_YAML:-config/yolo26_6cls.yaml}}"
+ENABLE_HAND_DETECTION="${ENABLE_HAND_DETECTION:-${CONTROL_ENABLE_HAND_DETECTION:-0}}"
+ENABLE_DISTANCE_DETECTION="${ENABLE_DISTANCE_DETECTION:-${CONTROL_ENABLE_DISTANCE_DETECTION:-0}}"
 DANGER_DISTANCE="${DANGER_DISTANCE:-${CONTROL_DANGER_DISTANCE:-300}}"
 CONF_THRES="${CONF_THRES:-${CONTROL_CONF_THRES:-0.55}}"
 CAMERA_SERIAL="${CAMERA_SERIAL:-${CONTROL_CAMERA_SERIAL:-}}"
@@ -64,7 +72,7 @@ echo "✓ Ascend 环境已加载"
 echo ""
 echo "[2/3] 启动 WebUI 服务器 (端口 8002)..."
 pkill -f "webui_server.py" 2>/dev/null || true
-nohup python3 edge/unified_app/webui_server.py > logs/webui_unified.log 2>&1 &
+nohup "$PYTHON_BIN" edge/unified_app/webui_server.py > logs/webui_unified.log 2>&1 &
 sleep 2
 echo "✓ WebUI 服务器已启动: http://ict.local:8002"
 
@@ -83,7 +91,7 @@ if [ ! -f "$YOLO_MODEL" ]; then
 fi
 
 CMD=(
-    /usr/bin/python3 edge/unified_app/unified_monitor_mp.py
+    "$PYTHON_BIN" edge/unified_app/unified_monitor_mp.py
     --yolo-model "$YOLO_MODEL"
     --data-yaml "$DATA_YAML"
     --danger-distance "$DANGER_DISTANCE"
@@ -92,6 +100,14 @@ CMD=(
 
 if [ -n "$CAMERA_SERIAL" ]; then
     CMD+=(--camera-serial "$CAMERA_SERIAL")
+fi
+
+if [ "$ENABLE_HAND_DETECTION" != "1" ]; then
+    CMD+=(--disable-hand)
+fi
+
+if [ "$ENABLE_DISTANCE_DETECTION" != "1" ]; then
+    CMD+=(--disable-distance)
 fi
 
 if [ "$ENABLE_LASER" = "1" ]; then

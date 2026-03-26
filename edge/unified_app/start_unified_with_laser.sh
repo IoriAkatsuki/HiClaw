@@ -13,11 +13,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ICT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BOARD_MODEL_DIR="/home/HwHiAiUser/ICT/d435_project/projects/yolo26_galvo/models"
 CONTROL_PLANE="$ICT_DIR/edge/unified_app/control_plane.py"
+PYTHON_BIN="${ICT_PYTHON_BIN:-$(command -v python3)}"
+PYTHON_SITE_PACKAGES="$("$PYTHON_BIN" -c 'import site; paths = [site.getusersitepackages(), *site.getsitepackages()]; seen = []; [seen.append(p) for p in paths if p and p not in seen]; print(":".join(seen))' 2>/dev/null || true)"
+
+if [ -n "$PYTHON_SITE_PACKAGES" ]; then
+    export PYTHONPATH="$PYTHON_SITE_PACKAGES${PYTHONPATH:+:$PYTHONPATH}"
+fi
 
 find_preferred_yolo_model() {
     local candidate=""
     if [ -d "$BOARD_MODEL_DIR" ]; then
-        for pattern in "*yolo26n*.om" "*yolo26n*.mindir" "*yolom*.om" "*yolo26m*.om" "*yolom*.mindir" "*yolo26m*.mindir"; do
+        for pattern in "*yolom*.om" "*yolo26m*.om" "*yolom*.mindir" "*yolo26m*.mindir" "*yolo26n*.om" "*yolo26n*.mindir"; do
             candidate=$(find "$BOARD_MODEL_DIR" -maxdepth 2 -type f -iname "$pattern" 2>/dev/null | sort | head -n 1)
             if [ -n "$candidate" ]; then
                 printf '%s\n' "$candidate"
@@ -30,7 +36,7 @@ find_preferred_yolo_model() {
 
 if [ -f "$CONTROL_PLANE" ]; then
     # 通过 control_plane.py shell-env 注入统一控制配置。
-    eval "$(python3 "$ICT_DIR/edge/unified_app/control_plane.py" shell-env "$ICT_DIR")"
+    eval "$("$PYTHON_BIN" "$ICT_DIR/edge/unified_app/control_plane.py" shell-env "$ICT_DIR")"
 fi
 
 # 模型和配置（允许通过环境变量覆盖）
@@ -38,6 +44,8 @@ YOLO_MODEL="${YOLO_MODEL:-${CONTROL_YOLO_MODEL:-$(find_preferred_yolo_model)}}"
 POSE_MODEL="${POSE_MODEL:-${CONTROL_POSE_MODEL:-$ICT_DIR/yolov8n_pose_aipp.om}}"
 DATA_YAML="${DATA_YAML:-${CONTROL_DATA_YAML:-$ICT_DIR/config/yolo26_6cls.yaml}}"
 CAMERA_SERIAL="${CAMERA_SERIAL:-${CONTROL_CAMERA_SERIAL:-}}"
+ENABLE_HAND_DETECTION="${ENABLE_HAND_DETECTION:-${CONTROL_ENABLE_HAND_DETECTION:-0}}"
+ENABLE_DISTANCE_DETECTION="${ENABLE_DISTANCE_DETECTION:-${CONTROL_ENABLE_DISTANCE_DETECTION:-0}}"
 
 # 参数（允许通过环境变量覆盖）
 DANGER_DISTANCE="${DANGER_DISTANCE:-${CONTROL_DANGER_DISTANCE:-300}}"
@@ -66,7 +74,7 @@ fi
 
 # 构建命令
 CMD=(
-    /usr/bin/python3 "$SCRIPT_DIR/unified_monitor_mp.py"
+    "$PYTHON_BIN" "$SCRIPT_DIR/unified_monitor_mp.py"
     --yolo-model "$YOLO_MODEL"
     --yolo-device "$YOLO_DEVICE"
     --data-yaml "$DATA_YAML"
@@ -76,6 +84,14 @@ CMD=(
 
 if [ -n "$CAMERA_SERIAL" ]; then
     CMD+=(--camera-serial "$CAMERA_SERIAL")
+fi
+
+if [ "$ENABLE_HAND_DETECTION" != "1" ]; then
+    CMD+=(--disable-hand)
+fi
+
+if [ "$ENABLE_DISTANCE_DETECTION" != "1" ]; then
+    CMD+=(--disable-distance)
 fi
 
 if [ -f "$POSE_MODEL" ]; then

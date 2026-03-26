@@ -358,23 +358,53 @@ class GalvoCalibrator:
         galvo_pts = np.array(galvo_points, dtype=np.float32)
         pixel_pts = np.array(source_points, dtype=np.float32)
 
-        # 当前正式标定目标是 pixel -> galvo 的 2D 视角映射关系。
-        # 每个点在进入这里之前已经经过多帧稳健聚合，因此优先使用全部稳定点做拟合，
-        # 避免目的坐标单位过大时，RANSAC 阈值过小把好点误判为外点。
-        homography, mask = cv2.findHomography(pixel_pts, galvo_pts, 0)
+        # 目标映射仍然是 pixel -> galvo，但 RANSAC 阈值应在像素域衡量。
+        # 因此先拟合 galvo -> pixel，再反求逆矩阵，避免 galvo 坐标量级过大时
+        # 单个坏点把整张映射拖垮。
+        ransac_threshold_px = max(
+            10.0,
+            float(self.detector_profile.get("ransac_reproj_threshold", 10.0)),
+        )
+        homography_galvo_to_pixel, mask = cv2.findHomography(
+            galvo_pts,
+            pixel_pts,
+            cv2.RANSAC,
+            ransac_threshold_px,
+        )
+
+        inlier_mask = None
+        homography = None
+        if homography_galvo_to_pixel is not None:
+            try:
+                homography = np.linalg.inv(homography_galvo_to_pixel)
+                inlier_mask = mask.reshape(-1).astype(bool) if mask is not None else None
+            except np.linalg.LinAlgError:
+                homography = None
+                inlier_mask = None
+
         if homography is None:
-            self.last_failure_reason = "单应性矩阵计算失败"
-            return False
+            homography, _ = cv2.findHomography(pixel_pts, galvo_pts, 0)
+            if homography is None:
+                self.last_failure_reason = "单应性矩阵计算失败"
+                return False
+            inlier_mask = np.ones(len(galvo_pts), dtype=bool)
 
         pred = cv2.perspectiveTransform(pixel_pts.reshape(-1, 1, 2), homography).reshape(-1, 2)
         errors = np.linalg.norm(pred - galvo_pts, axis=1)
 
+        if inlier_mask is None or not np.any(inlier_mask):
+            inlier_mask = np.ones(len(galvo_pts), dtype=bool)
+        inlier_errors = errors[inlier_mask]
+        if len(inlier_errors) == 0:
+            inlier_mask = np.ones(len(galvo_pts), dtype=bool)
+            inlier_errors = errors
+
         valid_points = len(galvo_pts)
-        inlier_points = valid_points
-        mean_error = float(np.mean(errors))
-        max_error = float(np.max(errors))
-        error_p95 = float(np.percentile(errors, 95))
-        passed, gate_reason = self.passes_quality_gate(valid_points, mean_error, max_error)
+        inlier_points = int(np.count_nonzero(inlier_mask))
+        mean_error = float(np.mean(inlier_errors))
+        max_error = float(np.max(inlier_errors))
+        error_p95 = float(np.percentile(inlier_errors, 95))
+        passed, gate_reason = self.passes_quality_gate(inlier_points, mean_error, max_error)
 
         self.homography_matrix = homography
         self.quality_metrics = {
@@ -384,6 +414,7 @@ class GalvoCalibrator:
             "mean_error": mean_error,
             "max_error": max_error,
             "error_p95": error_p95,
+            "outlier_points": int(valid_points - inlier_points),
             "pass": bool(passed),
             "gate_reason": gate_reason,
             "mapping_source": mapping_source,
@@ -391,6 +422,8 @@ class GalvoCalibrator:
         self.last_failure_reason = "" if passed else gate_reason
 
         print("✓ 单应性矩阵计算成功")
+        if inlier_points != valid_points:
+            print(f"  RANSAC 剔除离群点: {valid_points - inlier_points}")
         print(f"  平均重投影误差: {mean_error:.2f} 振镜单位")
         print(f"  最大重投影误差: {max_error:.2f} 振镜单位")
         return passed
@@ -841,13 +874,14 @@ class GalvoCalibrator:
         }
 
 
-def main():
+def parse_args():
     parser = argparse.ArgumentParser(description="激光振镜自动标定")
     parser.add_argument("--serial-port", default="/dev/ttyUSB0", help="串口设备")
     parser.add_argument("--baudrate", type=int, default=115200, help="波特率")
     parser.add_argument("--output", default="galvo_calibration.yaml", help="输出文件")
     parser.add_argument("--test", action="store_true", help="测试已有标定")
     parser.add_argument("--load", type=str, help="加载标定文件进行测试")
+    parser.add_argument("--headless", action="store_true", help="无头模式，禁用 OpenCV 窗口预览")
     parser.add_argument("--grid-size", type=int, default=3, help="标定网格维度")
     parser.add_argument("--x-range", type=int, default=15000, help="X 轴扫描半幅")
     parser.add_argument("--y-range", type=int, default=15000, help="Y 轴扫描半幅")
@@ -860,7 +894,12 @@ def main():
     parser.add_argument("--min-valid-points", type=int, default=4, help="最小有效点数")
     parser.add_argument("--mean-error-thres", type=float, default=500.0, help="平均误差阈值")
     parser.add_argument("--max-error-thres", type=float, default=1000.0, help="最大误差阈值")
-    args = parser.parse_args()
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    debug = not args.headless
 
     calibrator = GalvoCalibrator(
         serial_port=args.serial_port,
@@ -883,6 +922,9 @@ def main():
 
     try:
         if args.test or args.load:
+            if args.headless:
+                print("✗ 交互式测试模式不支持 --headless，请在有图形界面的环境下运行")
+                return 1
             calibration_path = args.load or args.output
             if not calibrator.load_calibration(calibration_path):
                 return 1
@@ -890,12 +932,12 @@ def main():
             return 0
 
         if args.auto_range:
-            suggestion = calibrator.discover_safe_ranges(camera_id=0, debug=True)
+            suggestion = calibrator.discover_safe_ranges(camera_id=0, debug=debug)
             calibrator.x_range = suggestion["x_range"]
             calibrator.y_range = suggestion["y_range"]
             calibrator._init_galvo_grid()
 
-        success = calibrator.calibrate_with_camera(camera_id=0, debug=True)
+        success = calibrator.calibrate_with_camera(camera_id=0, debug=debug)
         if not success:
             print("\n✗ 标定失败")
             return 1

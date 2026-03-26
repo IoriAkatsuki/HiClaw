@@ -5,6 +5,7 @@
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import cv2
 import numpy as np
@@ -167,6 +168,42 @@ class CalibrationQualityTest(unittest.TestCase):
         self.assertLess(c.quality_metrics.get('mean_error', 1e9), 300.0)
         self.assertLess(c.quality_metrics.get('max_error', 1e9), 700.0)
 
+    def test_calculate_homography_rejects_single_real_board_outlier(self):
+        c = GalvoCalibrator(
+            min_valid_points=7,
+            mean_error_thres=500.0,
+            max_error_thres=1000.0,
+        )
+
+        c.valid_galvo_points = [
+            (-15000, -15000),
+            (0, -15000),
+            (15000, -15000),
+            (-15000, 0),
+            (0, 0),
+            (15000, 0),
+            (-15000, 15000),
+            (0, 15000),
+            (15000, 15000),
+        ]
+        c.pixel_points = [
+            (4.6, 15.4),
+            (279.8, 359.7),
+            (123.0, 371.3),
+            (423.8, 204.6),
+            (274.7, 212.7),
+            (123.2, 220.9),
+            (426.0, 54.5),
+            (270.5, 65.1),
+            (112.7, 72.4),
+        ]
+
+        self.assertTrue(c.calculate_homography())
+        self.assertTrue(c.quality_metrics.get('pass', False))
+        self.assertEqual(c.quality_metrics.get('inlier_points'), 8)
+        self.assertLess(c.quality_metrics.get('mean_error', 1e9), 500.0)
+        self.assertLess(c.quality_metrics.get('max_error', 1e9), 1000.0)
+
     def test_custom_axis_ranges_expand_grid(self):
         c = GalvoCalibrator(
             grid_size=5,
@@ -263,6 +300,16 @@ class CalibrationQualityTest(unittest.TestCase):
         depth = c.sample_depth(depth_frame, 11, 10, radius=1)
 
         self.assertAlmostEqual(depth, 0.505, places=3)
+
+    def test_parse_args_accepts_headless(self):
+        with mock.patch("sys.argv", [
+            "calibrate_galvo.py",
+            "--serial-port", "/dev/ttyUSB0",
+            "--headless",
+        ]):
+            args = sys.modules["calibrate_galvo"].parse_args()
+
+        self.assertTrue(args.headless)
 
 
 if __name__ == '__main__':

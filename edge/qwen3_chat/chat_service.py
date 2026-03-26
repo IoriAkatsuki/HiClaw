@@ -103,6 +103,8 @@ class LlamaCppBackend:
             "-m", self.gguf,
             "-t", str(self.threads),
             "-ngl", "0",
+            # 在 Ascend 环境里显式禁用设备 offload，避免 llama.cpp 误走 ggml-cann。
+            "--device", "none",
             "--port", str(self.port),
             "--host", "127.0.0.1",
             "--reasoning-budget", "0",
@@ -155,7 +157,11 @@ class LlamaCppBackend:
     def close(self):
         if self._proc and self._proc.poll() is None:
             self._proc.terminate()
-            self._proc.wait(timeout=5)
+            try:
+                self._proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+                self._proc.wait(timeout=5)
 
 
 class ChatSession:

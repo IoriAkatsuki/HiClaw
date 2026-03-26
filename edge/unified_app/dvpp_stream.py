@@ -7,7 +7,11 @@ import asyncio
 import base64
 import hashlib
 import json
+import os
+import select
+import shutil
 import struct
+import subprocess
 import threading
 import time
 from typing import List, Optional
@@ -211,6 +215,112 @@ class VencStreamEncoder:
             self._session.close()
         except Exception:
             pass
+
+
+def build_ffmpeg_h264_command(ffmpeg_bin: str, width: int, height: int, fps: int) -> List[str]:
+    gop = max(int(fps * 2), 1)
+    return [
+        ffmpeg_bin,
+        "-loglevel", "error",
+        "-fflags", "nobuffer",
+        "-f", "rawvideo",
+        "-vcodec", "rawvideo",
+        "-pix_fmt", "bgr24",
+        "-s", f"{width}x{height}",
+        "-r", str(max(int(fps), 1)),
+        "-i", "pipe:0",
+        "-an",
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-tune", "zerolatency",
+        "-threads", "1",
+        "-pix_fmt", "yuv420p",
+        "-profile:v", "baseline",
+        "-level", "3.0",
+        "-g", str(gop),
+        "-x264-params", f"repeat-headers=1:scenecut=0:keyint={gop}:min-keyint={gop}",
+        "-f", "h264",
+        "pipe:1",
+    ]
+
+
+class FfmpegH264Encoder:
+    """Software H.264 fallback via ffmpeg/libx264 for WebSocket streaming."""
+
+    def __init__(self, width: int, height: int, fps: int):
+        ffmpeg_bin = shutil.which("ffmpeg")
+        if not ffmpeg_bin:
+            raise RuntimeError("ffmpeg 不可用，无法启用软件 H.264 fallback")
+        self.width = width
+        self.height = height
+        self.fps = max(int(fps), 1)
+        self._proc = subprocess.Popen(
+            build_ffmpeg_h264_command(ffmpeg_bin, width, height, self.fps),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            bufsize=0,
+        )
+        if self._proc.stdout is None or self._proc.stdin is None:
+            raise RuntimeError("ffmpeg 管道初始化失败")
+        os.set_blocking(self._proc.stdout.fileno(), False)
+
+    def _read_available(self) -> bytes:
+        if self._proc.stdout is None:
+            return b""
+        fd = self._proc.stdout.fileno()
+        chunks = []
+        while True:
+            ready, _, _ = select.select([fd], [], [], 0)
+            if not ready:
+                break
+            try:
+                chunk = os.read(fd, 1 << 20)
+            except BlockingIOError:
+                break
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+    def encode(self, bgr_frame: np.ndarray) -> bytes:
+        if self._proc.poll() is not None:
+            raise RuntimeError(f"ffmpeg 已退出，exit={self._proc.returncode}")
+        if self._proc.stdin is None:
+            raise RuntimeError("ffmpeg stdin 不可用")
+
+        frame = np.ascontiguousarray(bgr_frame)
+        self._proc.stdin.write(frame.tobytes())
+        self._proc.stdin.flush()
+
+        deadline = time.time() + 0.2
+        output = bytearray()
+        while time.time() < deadline:
+            chunk = self._read_available()
+            if chunk:
+                output.extend(chunk)
+                # ffmpeg 通常会在单帧后持续吐出完整 NAL；拿到一批后再短暂 drain 一次。
+                time.sleep(0.002)
+                continue
+            if output:
+                break
+            time.sleep(0.002)
+        return bytes(output)
+
+    def close(self):
+        proc = self._proc
+        if proc.stdin is not None:
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=2.0)
 
 
 # ---------------------------------------------------------------------------

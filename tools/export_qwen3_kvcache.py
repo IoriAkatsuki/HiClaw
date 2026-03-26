@@ -103,11 +103,19 @@ def export_decode(model, past_len: int, out_path: str):
     in_names = ["input_ids", "attention_mask"] + make_kv_names(n_layers, "past")
     out_names = ["logits"] + make_kv_names(n_layers, "present")
 
-    print(f"  Exporting {out_path}...", flush=True)
+    dyn_axes = {"attention_mask": {1: "total_seq"}}
+    for i in range(n_layers):
+        dyn_axes[f"past.{i}.key"] = {2: "past_seq"}
+        dyn_axes[f"past.{i}.value"] = {2: "past_seq"}
+        dyn_axes[f"present.{i}.key"] = {2: "total_seq"}
+        dyn_axes[f"present.{i}.value"] = {2: "total_seq"}
+
+    print(f"  Exporting {out_path} (dynamic_axes)...", flush=True)
     torch.onnx.export(
         wrapper, (dummy_ids, dummy_mask, *dummy_kv), out_path,
         input_names=in_names,
         output_names=out_names,
+        dynamic_axes=dyn_axes,
         opset_version=17, do_constant_folding=True, dynamo=False,
     )
     print(f"  OK: {os.path.getsize(out_path) / 1024 / 1024:.1f} MB")

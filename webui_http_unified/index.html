@@ -46,6 +46,8 @@
             border-bottom: 1px solid var(--border);
             background: rgba(0, 0, 0, 0.42);
             backdrop-filter: blur(10px);
+            overflow: hidden;
+            gap: 12px;
         }
 
         .logo {
@@ -57,6 +59,8 @@
             letter-spacing: 1px;
             text-transform: uppercase;
             color: var(--accent-primary);
+            white-space: nowrap;
+            flex-shrink: 0;
         }
 
         .system-status {
@@ -64,6 +68,9 @@
             gap: 16px;
             font-size: 0.82rem;
             color: var(--text-dim);
+            flex-shrink: 1;
+            min-width: 0;
+            overflow: hidden;
         }
 
         .status-item {
@@ -88,9 +95,110 @@
             flex: 1;
             display: grid;
             grid-template-columns: minmax(0, 1fr) 460px;
+            grid-template-rows: 1fr auto;
             gap: 1px;
             background: var(--border);
             overflow: hidden;
+        }
+
+        .chat-dock {
+            grid-column: 1 / -1;
+            background: var(--panel-bg);
+            display: flex;
+            flex-direction: column;
+            max-height: 260px;
+            min-height: 120px;
+            padding: 10px 16px;
+            border-top: 1px solid var(--accent-primary);
+            overflow: hidden;
+            resize: vertical;
+        }
+        .chat-dock .chat-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 8px;
+            flex-shrink: 0;
+        }
+        .chat-dock .chat-header h3 {
+            font-size: 0.85rem;
+            font-weight: 700;
+            color: var(--accent-primary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .chat-dock select {
+            background: rgba(0,0,0,0.4);
+            color: var(--text-main);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 3px 8px;
+            font-size: 0.75rem;
+        }
+        .chat-dock .chat-status { font-size: 0.7rem; color: var(--text-dim); }
+        .chat-dock .chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 6px;
+            background: rgba(0,0,0,0.25);
+            border-radius: 6px;
+            margin-bottom: 8px;
+        }
+        .chat-dock .chat-msg {
+            margin-bottom: 8px;
+            padding: 6px 10px;
+            border-radius: 8px;
+            max-width: 80%;
+            line-height: 1.4;
+            font-size: 0.85rem;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+        }
+        .chat-dock .chat-msg.user {
+            background: rgba(0,120,255,0.2);
+            border: 1px solid rgba(0,120,255,0.3);
+            margin-left: auto;
+            text-align: right;
+        }
+        .chat-dock .chat-msg.bot {
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.08);
+        }
+        .chat-dock .chat-msg .role { font-size: 0.65rem; color: #666; }
+        .chat-dock .chat-msg .meta { font-size: 0.6rem; color: #555; margin-top: 3px; }
+        .chat-dock .chat-input-row {
+            display: flex;
+            gap: 6px;
+            flex-shrink: 0;
+        }
+        .chat-dock .chat-input-row input {
+            flex: 1;
+            padding: 8px 12px;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+            background: rgba(0,0,0,0.35);
+            color: var(--text-main);
+            font-size: 0.85rem;
+            outline: none;
+        }
+        .chat-dock .chat-input-row input:focus { border-color: var(--accent-primary); }
+        .chat-dock .chat-input-row button {
+            padding: 8px 16px;
+            border-radius: 6px;
+            border: none;
+            font-weight: 600;
+            font-size: 0.8rem;
+            cursor: pointer;
+        }
+        .chat-dock .btn-send {
+            background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+            color: #000;
+        }
+        .chat-dock .btn-send:disabled { opacity: 0.4; cursor: wait; }
+        .chat-dock .btn-reset {
+            background: rgba(255,255,255,0.06);
+            color: var(--text-dim);
+            border: 1px solid var(--border);
         }
 
         .viewport-container {
@@ -122,6 +230,8 @@
             font-family: "Courier New", monospace;
             font-size: 0.75rem;
             line-height: 1.4;
+            max-width: 260px;
+            white-space: nowrap;
         }
 
         .viewport-banner {
@@ -135,6 +245,8 @@
             font-size: 0.78rem;
             color: var(--text-dim);
             max-width: 60%;
+            overflow-wrap: break-word;
+            word-break: break-word;
         }
 
         .viewport-banner strong {
@@ -164,6 +276,9 @@
             font-weight: 700;
             cursor: pointer;
             position: relative;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
 
         .tab-btn.active {
@@ -185,6 +300,7 @@
             display: none;
             flex: 1;
             overflow-y: auto;
+            overflow-x: hidden;
             padding: 18px;
         }
 
@@ -198,6 +314,7 @@
             border-radius: 10px;
             padding: 16px;
             margin-bottom: 14px;
+            overflow: hidden;
         }
 
         .card-title {
@@ -210,12 +327,16 @@
             color: var(--text-dim);
             text-transform: uppercase;
             letter-spacing: 1px;
+            min-width: 0;
+            gap: 8px;
         }
 
         .helper {
             font-size: 0.74rem;
             color: var(--text-dim);
             line-height: 1.5;
+            overflow-wrap: break-word;
+            word-break: break-word;
         }
 
         .stat-grid {
@@ -229,6 +350,8 @@
             border: 1px solid rgba(255, 255, 255, 0.05);
             border-radius: 8px;
             padding: 10px;
+            min-width: 0;
+            overflow: hidden;
         }
 
         .stat-label {
@@ -242,6 +365,10 @@
             font-family: "Courier New", monospace;
             font-size: 1rem;
             font-weight: 700;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            min-width: 0;
         }
 
         .safety-banner {
@@ -303,17 +430,24 @@
 
         .obj-meta {
             flex: 1;
+            min-width: 0;
         }
 
         .obj-name {
             font-size: 0.88rem;
             font-weight: 700;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
 
         .obj-extra {
             margin-top: 2px;
             color: var(--text-dim);
             font-size: 0.72rem;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
 
         .obj-score {
@@ -371,7 +505,7 @@
 
         .form-grid {
             display: grid;
-            grid-template-columns: 1fr 1fr;
+            grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
             gap: 12px;
         }
 
@@ -452,6 +586,8 @@
             font-size: 0.76rem;
             line-height: 1.45;
             white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            word-break: break-word;
         }
 
         .calibration-list {
@@ -462,7 +598,7 @@
 
         .calibration-row {
             display: grid;
-            grid-template-columns: 72px 1fr 1fr;
+            grid-template-columns: 42px minmax(0, 1fr) minmax(0, 1fr);
             gap: 8px;
             align-items: center;
         }
@@ -472,11 +608,25 @@
             font-size: 0.74rem;
         }
 
+        .calibration-row input {
+            width: 100%;
+            min-width: 0;
+            box-sizing: border-box;
+            padding: 6px 8px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 6px;
+            background: rgba(0, 0, 0, 0.35);
+            color: var(--text-main);
+            font-size: 0.78rem;
+        }
+
         .process-map {
             font-family: "Courier New", monospace;
             font-size: 0.72rem;
             line-height: 1.6;
             color: var(--text-dim);
+            overflow-x: auto;
+            word-break: break-all;
         }
 
         .tag {
@@ -507,10 +657,15 @@
         @media (max-width: 1280px) {
             main {
                 grid-template-columns: 1fr;
+                grid-template-rows: 1fr auto auto;
             }
 
             .sidebar {
                 max-height: 48vh;
+            }
+
+            .chat-dock {
+                max-height: 200px;
             }
         }
     </style>
@@ -701,6 +856,18 @@
                         </div>
                         <div class="form-field full">
                             <label class="checkbox-row">
+                                <input id="config-enable-hand-detection" type="checkbox">
+                                <span>启用手部检测</span>
+                            </label>
+                        </div>
+                        <div class="form-field full">
+                            <label class="checkbox-row">
+                                <input id="config-enable-distance-detection" type="checkbox">
+                                <span>启用距离危险检测</span>
+                            </label>
+                        </div>
+                        <div class="form-field full">
+                            <label class="checkbox-row">
                                 <input id="config-enable-laser" type="checkbox">
                                 <span>启用激光链路</span>
                             </label>
@@ -761,28 +928,23 @@
                 </div>
             </section>
         </aside>
-    </main>
 
-    <!-- Chat Panel -->
-    <div style="max-width:1400px;margin:16px auto;padding:0 20px">
-      <div class="card" style="max-height:500px;display:flex;flex-direction:column">
-        <div class="card-title" style="display:flex;align-items:center;gap:12px">
-          LLM Chat
-          <select id="chatBackend" style="background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:0.8em" onchange="chatSwitchBackend()"></select>
-          <span id="chatStatus" style="font-size:0.75em;color:var(--text-dim)"></span>
-        </div>
-        <div id="chatMessages" style="flex:1;overflow-y:auto;min-height:180px;max-height:340px;padding:10px;background:rgba(0,0,0,0.2);border-radius:8px;margin-bottom:10px"></div>
-        <div style="display:flex;gap:8px">
-          <input id="chatInput" type="text" placeholder="Send a message..." autocomplete="off"
-            style="flex:1;padding:10px 14px;border-radius:8px;border:1px solid var(--border);background:rgba(0,0,0,0.3);color:var(--text);outline:none"
-            onkeydown="if(event.key==='Enter'&&!chatBusy)chatSend()">
-          <button id="chatSendBtn" onclick="chatSend()"
-            style="padding:10px 20px;border-radius:8px;border:none;background:linear-gradient(135deg,#00b4d8,#0077b6);color:#fff;font-weight:bold;cursor:pointer">Send</button>
-          <button onclick="chatReset()"
-            style="padding:10px 12px;border-radius:8px;border:1px solid var(--border);background:rgba(255,255,255,0.05);color:var(--text-dim);cursor:pointer">Reset</button>
-        </div>
-      </div>
-    </div>
+        <!-- Chat dock (bottom bar, spans full width) -->
+        <section class="chat-dock">
+            <div class="chat-header">
+                <h3>LLM Chat</h3>
+                <select id="chatBackend" onchange="chatSwitchBackend()"></select>
+                <span id="chatStatus" class="chat-status"></span>
+            </div>
+            <div id="chatMessages" class="chat-messages"></div>
+            <div class="chat-input-row">
+                <input id="chatInput" type="text" placeholder="Send a message..." autocomplete="off"
+                    onkeydown="if(event.key==='Enter'&&!chatBusy)chatSend()">
+                <button id="chatSendBtn" class="btn-send" onclick="chatSend()">Send</button>
+                <button class="btn-reset" onclick="chatReset()">Reset</button>
+            </div>
+        </section>
+    </main>
 
     <script>
         const MARKER_STYLE_LABELS = {
@@ -848,6 +1010,8 @@
             serialPorts: document.getElementById("serial-ports"),
             configDangerDistance: document.getElementById("config-danger-distance"),
             configConfThres: document.getElementById("config-conf-thres"),
+            configEnableHandDetection: document.getElementById("config-enable-hand-detection"),
+            configEnableDistanceDetection: document.getElementById("config-enable-distance-detection"),
             configEnableLaser: document.getElementById("config-enable-laser"),
             configLaserSerial: document.getElementById("config-laser-serial"),
             configLaserBaudrate: document.getElementById("config-laser-baudrate"),
@@ -1145,6 +1309,8 @@
             DOM.cameraSerialInput.value = config.camera_serial || "";
             DOM.configDangerDistance.value = config.danger_distance ?? 300;
             DOM.configConfThres.value = config.conf_thres ?? 0.55;
+            DOM.configEnableHandDetection.checked = Boolean(config.enable_hand_detection);
+            DOM.configEnableDistanceDetection.checked = config.enable_distance_detection !== false;
             DOM.configEnableLaser.checked = Boolean(config.enable_laser);
             DOM.configLaserSerial.value = config.laser_serial || "/dev/ttyUSB0";
             DOM.configLaserBaudrate.value = config.laser_baudrate ?? 115200;
@@ -1461,6 +1627,8 @@
                 camera_serial: DOM.cameraSerialInput.value.trim(),
                 danger_distance: Number(DOM.configDangerDistance.value),
                 conf_thres: Number(DOM.configConfThres.value),
+                enable_hand_detection: Boolean(DOM.configEnableHandDetection.checked),
+                enable_distance_detection: Boolean(DOM.configEnableDistanceDetection.checked),
                 enable_laser: Boolean(DOM.configEnableLaser.checked),
                 laser_serial: DOM.configLaserSerial.value.trim(),
                 laser_baudrate: Number(DOM.configLaserBaudrate.value),
@@ -1476,6 +1644,8 @@
             DOM.cameraSerialInput,
             DOM.configDangerDistance,
             DOM.configConfThres,
+            DOM.configEnableHandDetection,
+            DOM.configEnableDistanceDetection,
             DOM.configEnableLaser,
             DOM.configLaserSerial,
             DOM.configLaserBaudrate,
@@ -1505,7 +1675,7 @@
         function startPolling() {
             if (!_frameInterval) _frameInterval = setInterval(() => {
                 DOM.frame.src = `frame.jpg?t=${Date.now()}`;
-            }, 120);
+            }, 40);
             if (!_stateInterval) _stateInterval = setInterval(fetchState, 250);
         }
         function stopPolling() {

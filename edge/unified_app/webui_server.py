@@ -28,6 +28,8 @@ ICT_ROOT = Path.home() / "ICT"
 WEB_DIR = ICT_ROOT / "webui_http_unified"
 TEMPLATE_DIR = Path(__file__).resolve().parents[2] / "webui_http_unified"
 RESTART_SKIP_ENV = "ICT_SKIP_CONTROL_RESTART"
+RESTART_COOLDOWN_SECONDS = 8.0
+LIVE_STATE_STALE_SECONDS = 4.0
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -36,12 +38,124 @@ if str(SCRIPT_DIR) not in sys.path:
 import control_plane as cp  # noqa: E402
 
 
-_calib_proc: dict = {"pid": None, "log_path": "", "proc": None, "exit_code": None}
-_calib_lock = threading.Lock()
+_calib_proc: dict = {
+    "pid": None,
+    "log_path": "",
+    "proc": None,
+    "exit_code": None,
+    "restart_after": False,
+    "restart_scheduled": False,
+    "restart_info": None,
+}
+_calib_lock = threading.RLock()
+_restart_lock = threading.Lock()
+_last_restart_ts = 0.0
 
 # ── Chat backend (lazy init) ──
 _chat_lock = threading.Lock()
 _chat_session = None
+
+
+def build_restart_shell_command(ict_root: Path, log_path: Path) -> str:
+    # 用正则字符类避免 pkill 误杀承载当前 shell_cmd 的 bash 进程自身。
+    target_pattern = "[u]nified_monitor_mp.py"
+    python_bin = shlex.quote(sys.executable)
+    return (
+        f"sleep 1; "
+        f"pkill -f {shlex.quote(target_pattern)} >/dev/null 2>&1 || true; "
+        f"cd {shlex.quote(str(ict_root))}; "
+        f"export ICT_PYTHON_BIN={python_bin}; "
+        f"nohup bash ./start_unified.sh > {shlex.quote(str(log_path))} 2>&1 < /dev/null &"
+    )
+
+
+def build_calibration_prep_shell_command(ict_root: Path) -> str:
+    camera_user_patterns = (
+        "[u]nified_monitor_mp.py",
+        "[u]nified_monitor.py",
+        "[h]and_safety_monitor.py",
+        "[h]and_safety_monitor_mediapipe.py",
+    )
+    parts = [f"cd {shlex.quote(str(ict_root))};"]
+    for pattern in camera_user_patterns:
+        parts.append(f"pkill -f {shlex.quote(pattern)} >/dev/null 2>&1 || true;")
+    parts.append("sleep 1")
+    return " ".join(parts)
+
+
+def stop_monitor_for_calibration(ict_root: Path) -> None:
+    shell_cmd = build_calibration_prep_shell_command(ict_root)
+    subprocess.run(
+        ["/bin/bash", "-lc", shell_cmd],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+    )
+
+
+def schedule_monitor_restart(reason: str = "manual") -> dict:
+    global _last_restart_ts
+    log_dir = ICT_ROOT / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    log_path = log_dir / f"control_restart_{timestamp}.log"
+    if os.environ.get(RESTART_SKIP_ENV) == "1":
+        return {"scheduled": False, "skipped": True, "reason": reason, "log": str(log_path)}
+
+    with _restart_lock:
+        now = time.time()
+        if now - _last_restart_ts < RESTART_COOLDOWN_SECONDS:
+            return {
+                "scheduled": False,
+                "cooldown": True,
+                "reason": reason,
+                "log": str(log_path),
+                "retry_after_s": max(0.0, RESTART_COOLDOWN_SECONDS - (now - _last_restart_ts)),
+            }
+        shell_cmd = build_restart_shell_command(ICT_ROOT, log_path)
+        subprocess.Popen(
+            ["/bin/bash", "-lc", shell_cmd],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+        )
+        _last_restart_ts = now
+    return {"scheduled": True, "reason": reason, "log": str(log_path)}
+
+
+def _monitor_process_running() -> bool:
+    result = subprocess.run(
+        ["/bin/bash", "-lc", "pgrep -f '[u]nified_monitor_mp.py|[s]tart_unified.sh' >/dev/null 2>&1"],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+    )
+    return result.returncode == 0
+
+
+def _live_state_is_stale(ict_root: Path, now: float | None = None) -> bool:
+    state_path = cp.get_live_state_path(ict_root)
+    if not state_path.exists():
+        return True
+    now = time.time() if now is None else now
+    try:
+        age = now - state_path.stat().st_mtime
+    except OSError:
+        return True
+    return age > LIVE_STATE_STALE_SECONDS
+
+
+def _ensure_monitor_running(reason: str) -> dict | None:
+    status = _get_calibration_status()
+    if status.get("running"):
+        return None
+    if _monitor_process_running():
+        return None
+    if not _live_state_is_stale(ICT_ROOT):
+        return None
+    return schedule_monitor_restart(reason)
 
 
 def _get_chat_session():
@@ -72,6 +186,7 @@ def _get_calibration_status() -> dict:
         proc = _calib_proc.get("proc")
         running = False
         exit_code = _calib_proc.get("exit_code")
+        restart_info = _calib_proc.get("restart_info")
         if proc is not None:
             polled = proc.poll()
             if polled is None:
@@ -79,20 +194,39 @@ def _get_calibration_status() -> dict:
             else:
                 exit_code = int(polled)
                 _calib_proc["exit_code"] = exit_code
+                if _calib_proc.get("restart_after") and not _calib_proc.get("restart_scheduled"):
+                    restart_info = schedule_monitor_restart("post_calibration")
+                    _calib_proc["restart_scheduled"] = True
+                    _calib_proc["restart_info"] = restart_info
         log_path = str(_calib_proc.get("log_path") or "")
-    return {"running": running, "log_tail": _tail_log(log_path), "exit_code": None if running else exit_code}
+    payload = {"running": running, "log_tail": _tail_log(log_path), "exit_code": None if running else exit_code}
+    if restart_info is not None:
+        payload["restart"] = restart_info
+    return payload
 
 
 def _start_calibration(serial_port: str, baudrate: int, output_path: str) -> dict:
+    stop_monitor_for_calibration(ICT_ROOT)
+    python_bin = os.environ.get("ICT_PYTHON_BIN") or sys.executable
     with tempfile.NamedTemporaryFile(prefix="ict_calib_", suffix=".log", delete=False) as lf:
         proc = subprocess.Popen(
-            ["python3", "edge/laser_galvo/calibrate_galvo.py",
-             "--serial-port", serial_port, "--baudrate", str(baudrate), "--output", output_path],
+            [python_bin, "edge/laser_galvo/calibrate_galvo.py",
+             "--serial-port", serial_port, "--baudrate", str(baudrate), "--output", output_path, "--headless"],
             cwd=str(ICT_ROOT), stdout=lf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
         )
         log_path = lf.name
     with _calib_lock:
-        _calib_proc.update({"pid": proc.pid, "log_path": log_path, "proc": proc, "exit_code": None})
+        _calib_proc.update(
+            {
+                "pid": proc.pid,
+                "log_path": log_path,
+                "proc": proc,
+                "exit_code": None,
+                "restart_after": True,
+                "restart_scheduled": False,
+                "restart_info": None,
+            }
+        )
     return {"pid": proc.pid, "log_path": log_path}
 
 
@@ -133,31 +267,16 @@ class MyHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
         return json.loads(raw.decode("utf-8"))
 
     def _schedule_restart(self) -> dict:
-        log_dir = ICT_ROOT / "logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        log_path = log_dir / f"control_restart_{timestamp}.log"
-        if os.environ.get(RESTART_SKIP_ENV) == "1":
-            return {"scheduled": False, "skipped": True, "log": str(log_path)}
-
-        shell_cmd = (
-            f"sleep 1; "
-            f"pkill -f {shlex.quote('edge/unified_app/unified_monitor_mp.py')} >/dev/null 2>&1 || true; "
-            f"cd {shlex.quote(str(ICT_ROOT))}; "
-            f"nohup bash ./start_unified.sh > {shlex.quote(str(log_path))} 2>&1 < /dev/null &"
-        )
-        subprocess.Popen(
-            ["/bin/bash", "-lc", shell_cmd],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL,
-        )
-        return {"scheduled": True, "log": str(log_path)}
+        return schedule_monitor_restart("config_apply")
 
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path == "/api/control/config":
-            self._send_json(cp.build_config_payload(ICT_ROOT))
+            restart = _ensure_monitor_running("missing_monitor")
+            payload = cp.build_config_payload(ICT_ROOT)
+            if restart is not None:
+                payload["auto_restart"] = restart
+            self._send_json(payload)
             return
         if parsed.path == "/api/control/models":
             config = cp.load_runtime_config(ICT_ROOT)

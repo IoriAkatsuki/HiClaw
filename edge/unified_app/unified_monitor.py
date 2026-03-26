@@ -809,6 +809,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--pose-model", help="YOLO-pose OM 模型路径（可选）")
     parser.add_argument("--disable-hand", action="store_true", help="关闭手部检测链路（不启用 pose，也不回退到 MediaPipe）")
+    parser.add_argument(
+        "--disable-distance",
+        "--disable-distance-detection",
+        dest="disable_distance",
+        action="store_true",
+        help="关闭距离危险检测（仍可保留手部检测）",
+    )
     parser.add_argument("--data-yaml", required=True, help="数据配置 YAML")
     parser.add_argument("--danger-distance", type=int, default=300, help="危险距离 (mm)")
     parser.add_argument("--conf-thres", type=float, default=0.55, help="YOLO 置信度阈值")
@@ -966,6 +973,7 @@ def main() -> None:
     last_ts = None
     frame_count = 0
     last_hand_results = None
+    distance_detection_enabled = not args.disable_distance
     last_laser_time = 0.0
     last_force_refresh_time = 0.0
     track_state: Dict[int, dict] = {}
@@ -1075,19 +1083,20 @@ def main() -> None:
                         wx, wy = wrist["pixel"]
                         depth_mm = wrist["depth_mm"]
                         color = (0, 255, 0)
-                        if depth_mm > 0 and (min_depth_mm is None or depth_mm < min_depth_mm):
-                            min_depth_mm = depth_mm
-                        if depth_mm > 0 and depth_mm < args.danger_distance:
-                            is_danger = True
-                            color = (0, 0, 255)
-                            near_obj, obj = check_hand_near_objects(
-                                (wx, wy), depth_mm, objects, args.danger_distance
-                            )
-                            if near_obj:
-                                danger_obj = obj
+                        if distance_detection_enabled:
+                            if depth_mm > 0 and (min_depth_mm is None or depth_mm < min_depth_mm):
+                                min_depth_mm = depth_mm
+                            if depth_mm > 0 and depth_mm < args.danger_distance:
+                                is_danger = True
+                                color = (0, 0, 255)
+                                near_obj, obj = check_hand_near_objects(
+                                    (wx, wy), depth_mm, objects, args.danger_distance
+                                )
+                                if near_obj:
+                                    danger_obj = obj
                         cv2.circle(frame, (wx, wy), 8, color, -1)
 
-                if is_danger:
+                if distance_detection_enabled and is_danger:
                     if danger_obj:
                         text = f"DANGER! Wrist near {danger_obj['name']}: {min_depth_mm:.0f}mm"
                     else:
@@ -1119,7 +1128,7 @@ def main() -> None:
                     try:
                         depth_m = depth_frame.get_distance(wx, wy)
                         depth_mm = depth_m * 1000.0
-                        if depth_mm > 0:
+                        if distance_detection_enabled and depth_mm > 0:
                             if min_depth_mm is None or depth_mm < min_depth_mm:
                                 min_depth_mm = depth_mm
                             if depth_mm < args.danger_distance:

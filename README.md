@@ -322,7 +322,11 @@ source /usr/local/Ascend/ascend-toolkit/set_env.sh
 
 ## 许可证
 
-本项目代码仅供学习和研究使用。
+本项目已开源，仓库地址：
+
+- GitHub: https://github.com/IoriAkatsuki/HiClaw
+
+本项目采用 **MIT License** 开源许可证。
 
 ## 更新日志
 
