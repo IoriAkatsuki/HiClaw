@@ -1,5 +1,5 @@
 """Qwen3 chat service on Ascend 310B1 — multi-backend (NPU .om / CPU llama.cpp)."""
-import json, re, time, subprocess, sys
+import json, os, re, signal, time, subprocess, sys
 import numpy as np
 from pathlib import Path
 
@@ -97,7 +97,29 @@ class LlamaCppBackend:
         self._proc = None
         self._start_server()
 
+    @staticmethod
+    def _kill_port_users(port: int):
+        """杀掉占用指定端口的残留 llama-server，防止孤儿进程冲突。"""
+        try:
+            out = subprocess.check_output(
+                ["ss", "-tlnp", f"sport = :{port}"],
+                stderr=subprocess.DEVNULL, timeout=5,
+            ).decode()
+            for pid_s in re.findall(r"pid=(\d+)", out):
+                pid = int(pid_s)
+                if pid != os.getpid():
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+            if re.search(r"pid=\d+", out):
+                time.sleep(0.5)
+        except (subprocess.CalledProcessError, FileNotFoundError,
+                subprocess.TimeoutExpired):
+            pass
+
     def _start_server(self):
+        self._kill_port_users(self.port)
         cmd = [
             str(LLAMA_CLI).replace("llama-cli", "llama-server"),
             "-m", self.gguf,

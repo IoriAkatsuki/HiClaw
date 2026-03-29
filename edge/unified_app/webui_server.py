@@ -59,13 +59,33 @@ def build_restart_shell_command(ict_root: Path, log_path: Path) -> str:
     # 用正则字符类避免 pkill 误杀承载当前 shell_cmd 的 bash 进程自身。
     target_pattern = "[u]nified_monitor_mp.py"
     python_bin = shlex.quote(sys.executable)
+    pid_parts = []
+    for pid in _load_runtime_worker_pids(ict_root):
+        pid_parts.append(f"kill -TERM {pid} >/dev/null 2>&1 || true; ")
     return (
         f"sleep 1; "
+        f"{''.join(pid_parts)}"
         f"pkill -f {shlex.quote(target_pattern)} >/dev/null 2>&1 || true; "
         f"cd {shlex.quote(str(ict_root))}; "
         f"export ICT_PYTHON_BIN={python_bin}; "
         f"nohup bash ./start_unified.sh > {shlex.quote(str(log_path))} 2>&1 < /dev/null &"
     )
+
+
+def _load_runtime_worker_pids(ict_root: Path) -> list[int]:
+    state = cp.load_live_state(ict_root)
+    raw = state.get("worker_pids")
+    if not isinstance(raw, dict):
+        return []
+    pids: list[int] = []
+    for value in raw.values():
+        try:
+            pid = int(value)
+        except (TypeError, ValueError):
+            continue
+        if pid > 1 and pid not in pids:
+            pids.append(pid)
+    return pids
 
 
 def build_calibration_prep_shell_command(ict_root: Path) -> str:
@@ -76,9 +96,14 @@ def build_calibration_prep_shell_command(ict_root: Path) -> str:
         "[h]and_safety_monitor_mediapipe.py",
     )
     parts = [f"cd {shlex.quote(str(ict_root))};"]
+    worker_pids = _load_runtime_worker_pids(ict_root)
+    for pid in worker_pids:
+        parts.append(f"kill -TERM {pid} >/dev/null 2>&1 || true;")
     for pattern in camera_user_patterns:
         parts.append(f"pkill -f {shlex.quote(pattern)} >/dev/null 2>&1 || true;")
-    parts.append("sleep 1")
+    parts.append("sleep 1;")
+    for pid in worker_pids:
+        parts.append(f"kill -0 {pid} >/dev/null 2>&1 && kill -KILL {pid} >/dev/null 2>&1 || true;")
     return " ".join(parts)
 
 
@@ -191,12 +216,7 @@ def _get_calibration_status() -> dict:
             if polled is None:
                 running = True
             else:
-                exit_code = int(polled)
-                _calib_proc["exit_code"] = exit_code
-                if _calib_proc.get("restart_after") and not _calib_proc.get("restart_scheduled"):
-                    restart_info = schedule_monitor_restart("post_calibration")
-                    _calib_proc["restart_scheduled"] = True
-                    _calib_proc["restart_info"] = restart_info
+                exit_code, restart_info = _finalize_calibration_exit(int(polled))
         log_path = str(_calib_proc.get("log_path") or "")
     payload = {"running": running, "log_tail": _tail_log(log_path), "exit_code": None if running else exit_code}
     if restart_info is not None:
@@ -204,13 +224,35 @@ def _get_calibration_status() -> dict:
     return payload
 
 
+def _finalize_calibration_exit(exit_code: int) -> tuple[int, dict | None]:
+    with _calib_lock:
+        _calib_proc["exit_code"] = int(exit_code)
+        restart_info = _calib_proc.get("restart_info")
+        if _calib_proc.get("restart_after") and not _calib_proc.get("restart_scheduled"):
+            restart_info = schedule_monitor_restart("post_calibration")
+            _calib_proc["restart_scheduled"] = True
+            _calib_proc["restart_info"] = restart_info
+        _calib_proc["proc"] = None
+        return int(exit_code), restart_info
+
+
+def _watch_calibration_process(proc: subprocess.Popen) -> None:
+    try:
+        exit_code = proc.wait()
+    except Exception:
+        return
+    _finalize_calibration_exit(int(exit_code))
+
+
 def _start_calibration(serial_port: str, baudrate: int, output_path: str) -> dict:
     stop_monitor_for_calibration(ICT_ROOT)
+    resolved_output = Path(output_path).expanduser()
+    overwrite_existing = resolved_output.exists()
     python_bin = os.environ.get("ICT_PYTHON_BIN") or sys.executable
     with tempfile.NamedTemporaryFile(prefix="ict_calib_", suffix=".log", delete=False) as lf:
         proc = subprocess.Popen(
             [python_bin, "edge/laser_galvo/calibrate_galvo.py",
-             "--serial-port", serial_port, "--baudrate", str(baudrate), "--output", output_path, "--headless"],
+             "--serial-port", serial_port, "--baudrate", str(baudrate), "--output", str(resolved_output), "--headless"],
             cwd=str(ICT_ROOT), stdout=lf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
         )
         log_path = lf.name
@@ -225,7 +267,14 @@ def _start_calibration(serial_port: str, baudrate: int, output_path: str) -> dic
                 "restart_info": None,
             }
         )
-    return {"pid": proc.pid, "log_path": log_path}
+    watcher = threading.Thread(target=_watch_calibration_process, args=(proc,), daemon=True)
+    watcher.start()
+    return {
+        "pid": proc.pid,
+        "log_path": log_path,
+        "output_path": str(resolved_output),
+        "overwrite_existing": overwrite_existing,
+    }
 
 
 def sync_template_assets(target_dir: Path) -> None:
@@ -356,7 +405,8 @@ class MyHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
             if parsed.path == "/api/control/calibration/stop":
                 with _calib_lock:
                     st = _get_calibration_status()
-                    pid = _calib_proc.get("pid")
+                    proc = _calib_proc.get("proc")
+                    pid = getattr(proc, "pid", None)
                 if not pid or not st["running"]:
                     self._send_json({"status": "not_running", **st})
                     return

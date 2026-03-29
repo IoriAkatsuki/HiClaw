@@ -23,7 +23,6 @@ MARKER_FILE_NAME = "unified_marker_state.json"
 STATE_FILE_NAME = "state.json"
 WEB_DIR_NAME = "webui_http_unified"
 DEFAULT_MODEL_RELATIVE = Path("models/route_a_yolo26/yolo26n_aug_full_8419_gpu.om")
-DEFAULT_POSE_MODEL_RELATIVE = Path("yolov8n_pose_aipp.om")
 DEFAULT_DATA_YAML_RELATIVE = Path("config/yolo26_6cls.yaml")
 DEFAULT_CALIBRATION_RELATIVE = Path("edge/laser_galvo/galvo_calibration.yaml")
 MODEL_SEARCH_DIRS = (
@@ -174,10 +173,10 @@ def default_runtime_config(ict_root: Path) -> dict:
     root = Path(ict_root)
     return {
         "yolo_model": find_default_model_path(root),
-        "pose_model": str(root / DEFAULT_POSE_MODEL_RELATIVE),
         "data_yaml": str(root / DEFAULT_DATA_YAML_RELATIVE),
         "enable_hand_detection": False,
         "enable_distance_detection": False,
+        "enable_video_stream": True,
         "danger_distance": 300,
         "conf_thres": 0.55,
         "enable_laser": False,
@@ -339,10 +338,10 @@ def shell_env_exports(ict_root: Path) -> str:
     config = load_runtime_config(ict_root)
     exports = {
         "CONTROL_YOLO_MODEL": config.get("yolo_model", ""),
-        "CONTROL_POSE_MODEL": config.get("pose_model", ""),
         "CONTROL_DATA_YAML": config.get("data_yaml", ""),
         "CONTROL_ENABLE_HAND_DETECTION": "1" if config.get("enable_hand_detection", False) else "0",
         "CONTROL_ENABLE_DISTANCE_DETECTION": "1" if config.get("enable_distance_detection", False) else "0",
+        "CONTROL_ENABLE_VIDEO_STREAM": "1" if config.get("enable_video_stream", True) else "0",
         "CONTROL_DANGER_DISTANCE": config.get("danger_distance", ""),
         "CONTROL_CONF_THRES": config.get("conf_thres", ""),
         "CONTROL_ENABLE_LASER": "1" if config.get("enable_laser") else "0",

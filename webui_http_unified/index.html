@@ -253,6 +253,23 @@
             color: var(--accent-primary);
         }
 
+        .stream-disabled {
+            position: absolute;
+            inset: 50% auto auto 50%;
+            transform: translate(-50%, -50%);
+            padding: 14px 18px;
+            border-radius: 10px;
+            background: rgba(0, 0, 0, 0.78);
+            border: 1px solid rgba(0, 242, 255, 0.25);
+            color: var(--text-main);
+            text-align: center;
+            font-size: 0.85rem;
+            line-height: 1.55;
+            max-width: min(88%, 340px);
+            display: none;
+            z-index: 12;
+        }
+
         .sidebar {
             background: #0b0d13;
             display: flex;
@@ -694,6 +711,10 @@
         <section class="viewport-container" id="viewport">
             <video id="live-video" autoplay muted playsinline style="display:none"></video>
             <img id="live-frame" src="frame.jpg" alt="Video Feed">
+            <div class="stream-disabled" id="stream-disabled">
+                视频流已关闭<br>
+                当前仍可进行配置、查看状态与启动自动标定。
+            </div>
             <div class="crosshair-info" id="pointer-info"></div>
             <div class="viewport-banner" id="viewport-banner">
                 <strong>监控模式</strong><br>
@@ -872,6 +893,12 @@
                                 <span>启用激光链路</span>
                             </label>
                         </div>
+                        <div class="form-field full">
+                            <label class="checkbox-row">
+                                <input id="config-enable-video-stream" type="checkbox">
+                                <span>启用视频流输出（关闭可节约性能，便于校准演示）</span>
+                            </label>
+                        </div>
                     </div>
                     <button class="btn" id="apply-config">应用配置并重启</button>
                     <div class="status-box" id="config-status">修改配置后点击“应用配置并重启”。</div>
@@ -967,6 +994,7 @@
             frame: document.getElementById("live-frame"),
             video: document.getElementById("live-video"),
             viewport: document.getElementById("viewport"),
+            streamDisabled: document.getElementById("stream-disabled"),
             pointerInfo: document.getElementById("pointer-info"),
             viewportBanner: document.getElementById("viewport-banner"),
             safety: document.getElementById("safety-status"),
@@ -1013,6 +1041,7 @@
             configEnableHandDetection: document.getElementById("config-enable-hand-detection"),
             configEnableDistanceDetection: document.getElementById("config-enable-distance-detection"),
             configEnableLaser: document.getElementById("config-enable-laser"),
+            configEnableVideoStream: document.getElementById("config-enable-video-stream"),
             configLaserSerial: document.getElementById("config-laser-serial"),
             configLaserBaudrate: document.getElementById("config-laser-baudrate"),
             configLaserCalibration: document.getElementById("config-laser-calibration"),
@@ -1047,6 +1076,12 @@
 
         let _calibPollTimer = null;
         let _classConfigDirty = false;
+        let _frameInterval = null;
+        let _stateInterval = null;
+        let _streamSocket = null;
+        let _streamReconnectTimer = null;
+        let _streamBlobUrl = null;
+        let _streamJmuxer = null;
 
         function switchTab(tabId) {
             DOM.tabButtons.forEach((btn) => {
@@ -1100,10 +1135,26 @@
             };
         }
 
+        function isVideoStreamEnabled() {
+            return appState.runtimeConfig.enable_video_stream !== false;
+        }
+
+        function getActiveViewportElement() {
+            if (DOM.video.style.display !== "none" && DOM.video.clientWidth > 0 && DOM.video.clientHeight > 0) {
+                return DOM.video;
+            }
+            if (DOM.frame.style.display !== "none" && DOM.frame.clientWidth > 0 && DOM.frame.clientHeight > 0) {
+                return DOM.frame;
+            }
+            return DOM.viewport;
+        }
+
         function getViewportPixel(event) {
-            const rect = DOM.frame.getBoundingClientRect();
-            const x = Math.round(((event.clientX - rect.left) / rect.width) * appState.frameWidth);
-            const y = Math.round(((event.clientY - rect.top) / rect.height) * appState.frameHeight);
+            const rect = getActiveViewportElement().getBoundingClientRect();
+            const safeWidth = Math.max(rect.width, 1);
+            const safeHeight = Math.max(rect.height, 1);
+            const x = Math.round(((event.clientX - rect.left) / safeWidth) * appState.frameWidth);
+            const y = Math.round(((event.clientY - rect.top) / safeHeight) * appState.frameHeight);
             return {x, y};
         }
 
@@ -1208,12 +1259,14 @@
                 return;
             }
             try {
-                await apiFetch("/api/control/calibration/run", {
+                const result = await apiFetch("/api/control/calibration/run", {
                     method: "POST",
                     body: JSON.stringify({serial_port, baudrate}),
                 });
                 _setCalibRunning(true);
-                DOM_CALIB.status.textContent = "标定进程已启动...";
+                DOM_CALIB.status.textContent = result.overwrite_existing
+                    ? `标定进程已启动，完成后将覆写现有标定文件：${result.output_path}`
+                    : `标定进程已启动，输出文件：${result.output_path}`;
                 if (_calibPollTimer) clearInterval(_calibPollTimer);
                 _calibPollTimer = setInterval(_pollCalibStatus, 1000);
             } catch (err) {
@@ -1312,6 +1365,7 @@
             DOM.configEnableHandDetection.checked = Boolean(config.enable_hand_detection);
             DOM.configEnableDistanceDetection.checked = config.enable_distance_detection !== false;
             DOM.configEnableLaser.checked = Boolean(config.enable_laser);
+            DOM.configEnableVideoStream.checked = config.enable_video_stream !== false;
             DOM.configLaserSerial.value = config.laser_serial || "/dev/ttyUSB0";
             DOM.configLaserBaudrate.value = config.laser_baudrate ?? 115200;
             DOM.configLaserCalibration.value = config.laser_calibration || "";
@@ -1425,6 +1479,7 @@
                 DOM_CALIB.autoBaud.value = appState.runtimeConfig.laser_baudrate || 115200;
                 renderConfigForm();
                 renderControlSources(payload);
+                syncVideoTransport();
                 renderSelectedTarget();
                 renderClassConfig();
                 renderSystemSummary();
@@ -1630,6 +1685,7 @@
                 enable_hand_detection: Boolean(DOM.configEnableHandDetection.checked),
                 enable_distance_detection: Boolean(DOM.configEnableDistanceDetection.checked),
                 enable_laser: Boolean(DOM.configEnableLaser.checked),
+                enable_video_stream: Boolean(DOM.configEnableVideoStream.checked),
                 laser_serial: DOM.configLaserSerial.value.trim(),
                 laser_baudrate: Number(DOM.configLaserBaudrate.value),
                 laser_calibration: DOM.configLaserCalibration.value.trim(),
@@ -1647,6 +1703,7 @@
             DOM.configEnableHandDetection,
             DOM.configEnableDistanceDetection,
             DOM.configEnableLaser,
+            DOM.configEnableVideoStream,
             DOM.configLaserSerial,
             DOM.configLaserBaudrate,
             DOM.configLaserCalibration,
@@ -1670,24 +1727,80 @@
             }
         });
 
-        let _frameInterval = null, _stateInterval = null;
-
         function startPolling() {
+            if (!isVideoStreamEnabled()) {
+                return;
+            }
             if (!_frameInterval) _frameInterval = setInterval(() => {
                 DOM.frame.src = `frame.jpg?t=${Date.now()}`;
             }, 40);
-            if (!_stateInterval) _stateInterval = setInterval(fetchState, 250);
         }
+
         function stopPolling() {
             clearInterval(_frameInterval); _frameInterval = null;
+        }
+
+        function startStatePolling() {
+            if (!_stateInterval) _stateInterval = setInterval(fetchState, 250);
+        }
+
+        function stopStatePolling() {
             clearInterval(_stateInterval); _stateInterval = null;
         }
 
+        function teardownStreamSession() {
+            if (_streamReconnectTimer) {
+                clearTimeout(_streamReconnectTimer);
+                _streamReconnectTimer = null;
+            }
+            if (_streamSocket) {
+                _streamSocket.onclose = null;
+                _streamSocket.onerror = null;
+                _streamSocket.onmessage = null;
+                try {
+                    _streamSocket.close();
+                } catch (_) {}
+                _streamSocket = null;
+            }
+            if (_streamJmuxer) {
+                _streamJmuxer.destroy();
+                _streamJmuxer = null;
+            }
+            if (_streamBlobUrl) {
+                URL.revokeObjectURL(_streamBlobUrl);
+                _streamBlobUrl = null;
+            }
+            DOM.video.style.display = "none";
+            DOM.video.removeAttribute("src");
+        }
+
+        function syncVideoTransport() {
+            const enabled = isVideoStreamEnabled();
+            DOM.streamDisabled.style.display = enabled ? "none" : "block";
+            if (!enabled) {
+                stopPolling();
+                teardownStreamSession();
+                DOM.frame.style.display = "none";
+                DOM.frame.removeAttribute("src");
+                return;
+            }
+            DOM.frame.style.display = "";
+            startPolling();
+            connectStream();
+        }
+
         function connectStream() {
+            if (!isVideoStreamEnabled()) {
+                return;
+            }
+            if (_streamSocket && (_streamSocket.readyState === WebSocket.OPEN || _streamSocket.readyState === WebSocket.CONNECTING)) {
+                return;
+            }
             const wsPort = 8003;
             const ws = new WebSocket(`ws://${location.hostname}:${wsPort}/stream`);
+            _streamSocket = ws;
             ws.binaryType = 'arraybuffer';
-            let jmuxer = null, mode = null, prevBlobUrl = null;
+            let mode = null;
 
             ws.onmessage = (e) => {
                 if (typeof e.data === 'string') {
@@ -1695,9 +1808,14 @@
                     if (msg.type === 'init') {
                         mode = msg.codec;
                         if (mode === 'avc1.42E01E' && typeof JMuxer !== 'undefined') {
-                            jmuxer = new JMuxer({ node: 'live-video', mode: 'video',
-                                                  fps: msg.fps, flushingTime: 0 });
+                            if (_streamJmuxer) {
+                                _streamJmuxer.destroy();
+                            }
+                            _streamJmuxer = new JMuxer({ node: 'live-video', mode: 'video',
+                                                         fps: msg.fps, flushingTime: 0 });
                             DOM.video.style.display = ''; DOM.frame.style.display = 'none';
+                        } else {
+                            DOM.video.style.display = 'none'; DOM.frame.style.display = '';
                         }
                         stopPolling();
                     } else {
@@ -1705,21 +1823,37 @@
                         updateLiveStateUI();
                     }
                 } else if (e.data instanceof ArrayBuffer) {
-                    if (mode === 'avc1.42E01E' && jmuxer) {
-                        jmuxer.feed({ video: new Uint8Array(e.data) });
+                    if (mode === 'avc1.42E01E' && _streamJmuxer) {
+                        _streamJmuxer.feed({ video: new Uint8Array(e.data) });
                     } else {
-                        if (prevBlobUrl) URL.revokeObjectURL(prevBlobUrl);
+                        if (_streamBlobUrl) URL.revokeObjectURL(_streamBlobUrl);
                         const blob = new Blob([e.data], { type: 'image/jpeg' });
-                        prevBlobUrl = URL.createObjectURL(blob);
-                        DOM.frame.src = prevBlobUrl;
+                        _streamBlobUrl = URL.createObjectURL(blob);
+                        DOM.frame.src = _streamBlobUrl;
                     }
                 }
             };
             ws.onclose = ws.onerror = () => {
-                if (jmuxer) { jmuxer.destroy(); jmuxer = null; }
-                DOM.video.style.display = 'none'; DOM.frame.style.display = '';
-                startPolling();
-                setTimeout(connectStream, 2000);
+                if (_streamSocket !== ws) {
+                    return;
+                }
+                _streamSocket = null;
+                if (_streamJmuxer) {
+                    _streamJmuxer.destroy();
+                    _streamJmuxer = null;
+                }
+                DOM.video.style.display = 'none';
+                if (isVideoStreamEnabled()) {
+                    DOM.frame.style.display = '';
+                    startPolling();
+                    if (_streamReconnectTimer) {
+                        clearTimeout(_streamReconnectTimer);
+                    }
+                    _streamReconnectTimer = setTimeout(() => {
+                        _streamReconnectTimer = null;
+                        connectStream();
+                    }, 2000);
+                }
             };
         }
 
@@ -1729,8 +1863,8 @@
             renderCalibrationRows();
             renderMatrix(null);
             setInterval(fetchControlConfig, 3000);
-            startPolling();
-            connectStream();
+            startStatePolling();
+            syncVideoTransport();
         })();
 
         /* ── Chat ── */
@@ -1765,8 +1899,6 @@
                 if (d.error) { sp.children[1].innerHTML = '⚠ ' + d.error; }
                 else {
                     sp.children[1].innerHTML = d.reply.replace(/\n/g,'<br>');
-                    const meta = d.tokens+' tok · '+d.speed+' tok/s · '+d.backend;
-                    sp.innerHTML += '<div style="font-size:0.65em;color:#666;margin-top:4px">'+meta+'</div>';
                 }
             } catch(e) { sp.children[1].innerHTML = '⚠ Network error'; }
             chatMsgs.scrollTop = chatMsgs.scrollHeight;

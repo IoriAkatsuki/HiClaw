@@ -41,11 +41,11 @@ fi
 
 # 模型和配置（允许通过环境变量覆盖）
 YOLO_MODEL="${YOLO_MODEL:-${CONTROL_YOLO_MODEL:-$(find_preferred_yolo_model)}}"
-POSE_MODEL="${POSE_MODEL:-${CONTROL_POSE_MODEL:-$ICT_DIR/yolov8n_pose_aipp.om}}"
 DATA_YAML="${DATA_YAML:-${CONTROL_DATA_YAML:-$ICT_DIR/config/yolo26_6cls.yaml}}"
 CAMERA_SERIAL="${CAMERA_SERIAL:-${CONTROL_CAMERA_SERIAL:-}}"
 ENABLE_HAND_DETECTION="${ENABLE_HAND_DETECTION:-${CONTROL_ENABLE_HAND_DETECTION:-0}}"
 ENABLE_DISTANCE_DETECTION="${ENABLE_DISTANCE_DETECTION:-${CONTROL_ENABLE_DISTANCE_DETECTION:-0}}"
+ENABLE_VIDEO_STREAM="${ENABLE_VIDEO_STREAM:-${CONTROL_ENABLE_VIDEO_STREAM:-1}}"
 
 # 参数（允许通过环境变量覆盖）
 DANGER_DISTANCE="${DANGER_DISTANCE:-${CONTROL_DANGER_DISTANCE:-300}}"
@@ -94,12 +94,11 @@ if [ "$ENABLE_DISTANCE_DETECTION" != "1" ]; then
     CMD+=(--disable-distance)
 fi
 
-if [ -f "$POSE_MODEL" ]; then
-    CMD+=(--pose-model "$POSE_MODEL")
-    echo "手部模型: 使用 YOLO pose ($POSE_MODEL)"
-else
-    echo "手部模型: 未找到 pose OM，回退到 MediaPipe ($POSE_MODEL)"
+if [ "$ENABLE_VIDEO_STREAM" != "1" ]; then
+    CMD+=(--disable-video-stream)
 fi
+
+echo "手部模型: MediaPipe Hands"
 
 # 检查是否启用激光
 LASER_ENABLED_FLAG=0

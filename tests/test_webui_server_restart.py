@@ -34,12 +34,21 @@ class WebUiServerRestartTest(unittest.TestCase):
     def test_build_calibration_prep_shell_command_stops_camera_users(self):
         module = load_module()
 
-        shell_cmd = module.build_calibration_prep_shell_command(Path("/home/HwHiAiUser/ICT"))
+        original_load_live_state = module.cp.load_live_state
+        try:
+            module.cp.load_live_state = lambda _root: {"worker_pids": {"camera_capture": 111, "detector": 222}}
+            shell_cmd = module.build_calibration_prep_shell_command(Path("/home/HwHiAiUser/ICT"))
+        finally:
+            module.cp.load_live_state = original_load_live_state
 
         self.assertIn("[u]nified_monitor_mp.py", shell_cmd)
         self.assertIn("[u]nified_monitor.py", shell_cmd)
         self.assertIn("[h]and_safety_monitor.py", shell_cmd)
         self.assertIn("[h]and_safety_monitor_mediapipe.py", shell_cmd)
+        self.assertIn("kill -TERM 111", shell_cmd)
+        self.assertIn("kill -TERM 222", shell_cmd)
+        self.assertIn("kill -KILL 111", shell_cmd)
+        self.assertIn("kill -KILL 222", shell_cmd)
         self.assertIn("sleep 1", shell_cmd)
 
     def test_start_calibration_stops_stream_before_spawn(self):
@@ -52,8 +61,12 @@ class WebUiServerRestartTest(unittest.TestCase):
             def poll(self):
                 return None
 
+            def wait(self):
+                return 0
+
         original_stop = module.stop_monitor_for_calibration
         original_popen = module.subprocess.Popen
+        original_thread = module.threading.Thread
         try:
             module.stop_monitor_for_calibration = lambda ict_root: call_order.append(("stop", Path(ict_root)))
 
@@ -61,17 +74,60 @@ class WebUiServerRestartTest(unittest.TestCase):
                 call_order.append(("spawn", args, kwargs))
                 return _DummyProc()
 
+            class _DummyThread:
+                def __init__(self, *, target=None, args=(), daemon=None):
+                    call_order.append(("thread_init", target, args, daemon))
+
+                def start(self):
+                    call_order.append(("thread_start",))
+
             module.subprocess.Popen = _fake_popen
+            module.threading.Thread = _DummyThread
 
             result = module._start_calibration("/dev/ttyUSB0", 115200, "/tmp/galvo.yaml")
         finally:
             module.stop_monitor_for_calibration = original_stop
             module.subprocess.Popen = original_popen
+            module.threading.Thread = original_thread
 
         self.assertEqual(call_order[0][0], "stop")
         self.assertEqual(call_order[1][0], "spawn")
+        self.assertEqual(call_order[2][0], "thread_init")
+        self.assertEqual(call_order[3][0], "thread_start")
         self.assertIn("--headless", call_order[1][1][0])
         self.assertEqual(result["pid"], 43210)
+
+    def test_start_calibration_reports_existing_output_will_be_overwritten(self):
+        module = load_module()
+
+        class _DummyProc:
+            pid = 43210
+
+            def poll(self):
+                return None
+
+            def wait(self):
+                return 0
+
+        original_stop = module.stop_monitor_for_calibration
+        original_popen = module.subprocess.Popen
+        original_thread = module.threading.Thread
+        try:
+            module.stop_monitor_for_calibration = lambda ict_root: None
+            module.subprocess.Popen = lambda *args, **kwargs: _DummyProc()
+            module.threading.Thread = lambda *args, **kwargs: type("_DummyThread", (), {"start": lambda self: None})()
+            with module.tempfile.TemporaryDirectory() as tmpdir:
+                output_path = Path(tmpdir) / "galvo.yaml"
+                output_path.write_text("homography_matrix: []\n", encoding="utf-8")
+
+                result = module._start_calibration("/dev/ttyUSB0", 115200, str(output_path))
+        finally:
+            module.stop_monitor_for_calibration = original_stop
+            module.subprocess.Popen = original_popen
+            module.threading.Thread = original_thread
+
+        self.assertTrue(result["overwrite_existing"])
+        self.assertEqual(result["output_path"], str(output_path))
 
     def test_calibration_lock_is_reentrant_for_nested_status_checks(self):
         module = load_module()
@@ -123,6 +179,82 @@ class WebUiServerRestartTest(unittest.TestCase):
         self.assertEqual(status["exit_code"], 0)
         self.assertEqual(restart_calls, ["post_calibration"])
         self.assertEqual(status["restart"]["reason"], "post_calibration")
+
+    def test_finalize_calibration_exit_restarts_without_status_polling(self):
+        module = load_module()
+        restart_calls = []
+
+        original_schedule = module.schedule_monitor_restart
+        original_state = dict(module._calib_proc)
+        try:
+            module.schedule_monitor_restart = lambda reason="": restart_calls.append(reason) or {
+                "scheduled": True,
+                "reason": reason,
+                "log": "/tmp/restart.log",
+            }
+            module._calib_proc.update(
+                {
+                    "log_path": "/tmp/test.log",
+                    "proc": object(),
+                    "exit_code": None,
+                    "restart_after": True,
+                    "restart_scheduled": False,
+                    "restart_info": None,
+                }
+            )
+
+            exit_code, restart = module._finalize_calibration_exit(0)
+        finally:
+            module.schedule_monitor_restart = original_schedule
+            module._calib_proc.clear()
+            module._calib_proc.update(original_state)
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(restart_calls, ["post_calibration"])
+        self.assertEqual(restart["reason"], "post_calibration")
+
+    def test_calibration_stop_uses_proc_pid_without_cached_pid_field(self):
+        module = load_module()
+        sent = {}
+        kill_calls = []
+
+        class _RunningProc:
+            pid = 56789
+
+        original_status = module._get_calibration_status
+        original_kill = module.os.kill
+        original_state = dict(module._calib_proc)
+        try:
+            module._get_calibration_status = lambda: {"running": True, "log_tail": "", "exit_code": None}
+            module.os.kill = lambda pid, sig: kill_calls.append((pid, sig))
+            module._calib_proc.clear()
+            module._calib_proc.update(
+                {
+                    "log_path": "/tmp/test.log",
+                    "proc": _RunningProc(),
+                    "exit_code": None,
+                    "restart_after": True,
+                    "restart_scheduled": False,
+                    "restart_info": None,
+                }
+            )
+
+            handler = module.MyHTTPRequestHandler.__new__(module.MyHTTPRequestHandler)
+            handler.path = "/api/control/calibration/stop"
+            handler._read_json_body = lambda: {}
+            handler._send_json = lambda payload, status=200: sent.update({"payload": payload, "status": status})
+
+            handler.do_POST()
+        finally:
+            module._get_calibration_status = original_status
+            module.os.kill = original_kill
+            module._calib_proc.clear()
+            module._calib_proc.update(original_state)
+
+        self.assertEqual(sent["status"], 200)
+        self.assertEqual(sent["payload"]["status"], "stopping")
+        self.assertEqual(sent["payload"]["pid"], 56789)
+        self.assertEqual(kill_calls, [(56789, module.signal.SIGTERM)])
 
 
 if __name__ == "__main__":

@@ -36,10 +36,10 @@ if [ -f "$CONTROL_PLANE" ]; then
 fi
 
 YOLO_MODEL="${YOLO_MODEL:-${CONTROL_YOLO_MODEL:-$(find_preferred_yolo_model)}}"
-POSE_MODEL="${POSE_MODEL:-${CONTROL_POSE_MODEL:-$HOME/ICT/yolov8n_pose_aipp.om}}"
 DATA_YAML="${DATA_YAML:-${CONTROL_DATA_YAML:-config/yolo26_6cls.yaml}}"
 ENABLE_HAND_DETECTION="${ENABLE_HAND_DETECTION:-${CONTROL_ENABLE_HAND_DETECTION:-0}}"
 ENABLE_DISTANCE_DETECTION="${ENABLE_DISTANCE_DETECTION:-${CONTROL_ENABLE_DISTANCE_DETECTION:-0}}"
+ENABLE_VIDEO_STREAM="${ENABLE_VIDEO_STREAM:-${CONTROL_ENABLE_VIDEO_STREAM:-1}}"
 DANGER_DISTANCE="${DANGER_DISTANCE:-${CONTROL_DANGER_DISTANCE:-300}}"
 CONF_THRES="${CONF_THRES:-${CONTROL_CONF_THRES:-0.55}}"
 CAMERA_SERIAL="${CAMERA_SERIAL:-${CONTROL_CAMERA_SERIAL:-}}"
@@ -80,7 +80,7 @@ echo "✓ WebUI 服务器已启动: http://ict.local:8002"
 echo ""
 echo "[3/3] 启动统一检测监控..."
 echo "  YOLO 模型: $YOLO_MODEL"
-echo "  Pose 模型: $POSE_MODEL"
+echo "  手部模型: MediaPipe Hands"
 echo "  配置文件: $DATA_YAML"
 echo "  危险距离: ${DANGER_DISTANCE}mm"
 echo ""
@@ -110,18 +110,15 @@ if [ "$ENABLE_DISTANCE_DETECTION" != "1" ]; then
     CMD+=(--disable-distance)
 fi
 
+if [ "$ENABLE_VIDEO_STREAM" != "1" ]; then
+    CMD+=(--disable-video-stream)
+fi
+
 if [ "$ENABLE_LASER" = "1" ]; then
     CMD+=(--enable-laser --laser-serial "$LASER_SERIAL" --laser-baudrate "$LASER_BAUDRATE")
     if [ -n "$LASER_CALIBRATION" ]; then
         CMD+=(--laser-calibration "$LASER_CALIBRATION")
     fi
-fi
-
-if [ -f "$POSE_MODEL" ]; then
-    CMD+=(--pose-model "$POSE_MODEL")
-    echo "  使用 YOLO pose: $POSE_MODEL"
-else
-    echo "  未找到 pose OM，回退到 MediaPipe: $POSE_MODEL"
 fi
 
 "${CMD[@]}"

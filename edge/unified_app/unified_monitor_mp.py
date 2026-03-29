@@ -22,6 +22,7 @@ import queue
 import signal
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import shared_memory
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -46,6 +47,7 @@ COLOR_SHAPE = (FRAME_HEIGHT, FRAME_WIDTH, 3)
 DEPTH_SHAPE = (FRAME_HEIGHT, FRAME_WIDTH)
 OVERLAY_SHAPE = (FRAME_HEIGHT, FRAME_WIDTH, 4)
 TEXT_SLOT_SIZE = 4096
+STALE_DETECTION_FRAME_LAG_THRESHOLD = 6
 _UM_MODULE = None
 
 
@@ -78,6 +80,11 @@ def h264_stream_enabled() -> bool:
 
 def should_enable_depth_pipeline(args) -> bool:
     return (not bool(getattr(args, "disable_hand", False))) and (not bool(getattr(args, "disable_distance", False)))
+
+
+def should_drop_stale_detection_result(*, seq_captured: int, latest_frame_seq: int) -> bool:
+    """允许检测结果滞后少量相机帧，避免较慢模型被持续误丢弃。"""
+    return int(latest_frame_seq) >= int(seq_captured) + STALE_DETECTION_FRAME_LAG_THRESHOLD
 
 
 def init_h264_stream_encoder(
@@ -142,20 +149,38 @@ def resolve_camera_serial(devices, rs_module, preferred_serial: str = "") -> str
     return available[0]
 
 
-def emit_marker_command(galvo, style: str, box: Sequence[float], *, frame_width: int, frame_height: int) -> bool:
+def emit_marker_command(
+    galvo,
+    style: str,
+    box: Sequence[float],
+    *,
+    frame_width: int,
+    frame_height: int,
+    software_sweep: bool = False,
+) -> bool:
     if style == "circle":
         x1, y1, x2, y2 = [float(v) for v in box]
         center_x = (x1 + x2) / 2.0
         center_y = (y1 + y2) / 2.0
         radius_px = max(1.0, max(abs(x2 - x1), abs(y2 - y1)) / 2.0)
         gx, gy = galvo.pixel_to_galvo(center_x, center_y, frame_width, frame_height)
-        # 像素半径→振镜坐标半径：32768/320 ≈ 102.4（半轴满幅/半画面宽度）
-        radius = int(max(1.0, radius_px * 102.4))
-        return galvo.draw_circle(gx, gy, radius, task_index=0)
+        # 投影偏移点计算振镜空间半径，自适应 homography 局部缩放
+        gx2, gy2 = galvo.pixel_to_galvo(
+            center_x + radius_px, center_y, frame_width, frame_height
+        )
+        radius = int(max(1.0, ((gx2 - gx) ** 2 + (gy2 - gy) ** 2) ** 0.5))
+        return galvo.draw_circle(gx, gy, radius)
+    if software_sweep and hasattr(galvo, "draw_box_sweep"):
+        return galvo.draw_box_sweep(
+            box,
+            pixel_coords=True,
+            image_width=frame_width,
+            image_height=frame_height,
+            max_tasks=8,
+        )
     return galvo.draw_box(
         box,
         pixel_coords=True,
-        task_index=0,
         image_width=frame_width,
         image_height=frame_height,
         steps_per_edge=15,
@@ -391,6 +416,27 @@ def _snapshot_objects_for_draw(snapshot: dict) -> Tuple[List[dict], Set[int]]:
     return objects, highlighted_ids
 
 
+def _draw_wrist_annotations(frame: np.ndarray, wrist_annotations: list, danger_distance: float = 300.0):
+    _HAND_11_LINES = [(0, 1), (1, 2), (0, 3), (3, 4), (0, 5), (5, 6),
+                      (0, 7), (7, 8), (0, 9), (9, 10)]
+    for wa in wrist_annotations:
+        px, py = wa["px"], wa["py"]
+        depth_mm = wa.get("depth_mm", 0.0)
+        color = (0, 0, 255) if depth_mm > 0 and depth_mm < danger_distance else (0, 255, 0)
+        hand_pts = wa.get("hand_pts")
+        if hand_pts:
+            for a, b in _HAND_11_LINES:
+                if a < len(hand_pts) and b < len(hand_pts):
+                    cv2.line(frame, hand_pts[a], hand_pts[b], (0, 220, 0), 2)
+            for pt in hand_pts:
+                cv2.circle(frame, pt, 5, (0, 255, 255), -1)
+        cv2.circle(frame, (px, py), 8, color, -1)
+        cv2.circle(frame, (px, py), 10, (255, 255, 255), 2)
+        if depth_mm > 0:
+            cv2.putText(frame, f"{int(depth_mm)}mm", (px + 12, py + 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
+
+
 def render_live_frame_from_snapshot(frame: np.ndarray, snapshot: dict) -> np.ndarray:
     annotated = np.ascontiguousarray(frame.copy())
     objects, highlighted_ids = _snapshot_objects_for_draw(snapshot)
@@ -412,6 +458,9 @@ def render_live_frame_from_snapshot(frame: np.ndarray, snapshot: dict) -> np.nda
             (0, 0, 255),
             3,
         )
+    wrist_annotations = snapshot.get("wrist_annotations")
+    if wrist_annotations:
+        _draw_wrist_annotations(annotated, wrist_annotations)
     return annotated
 
 
@@ -588,7 +637,7 @@ def detection_worker(
     overlay_shm, overlay_buf = attach_shared_buffer(overlay_name, OVERLAY_SHAPE, np.uint8)
 
     yolo_backend = um.detect_yolo_backend(args.yolo_model)
-    needs_acl = yolo_backend == "acl" or args.pose_model is not None
+    needs_acl = yolo_backend == "acl"
     distance_detection_enabled = not bool(args.disable_distance)
     depth_enabled = should_enable_depth_pipeline(args)
 
@@ -605,18 +654,12 @@ def detection_worker(
         yolo_model = um.UltralyticsYoloModel(args.yolo_model, device=args.yolo_device)
         yolo_model.load()
 
-    pose_model = None
     hands = None
     if args.disable_hand:
         write_text_slot(runtime.hand_backend, "disabled")
-    elif args.pose_model:
-        pose_model = um.AclLiteModel(args.pose_model)
-        pose_model.load()
-        pose_model.context = res.context
-        write_text_slot(runtime.hand_backend, "pose")
     else:
         if um.mp is None:
-            write_text_slot(runtime.fatal_error, "未找到 mediapipe 且未提供 pose-model")
+            write_text_slot(runtime.fatal_error, "未找到 mediapipe 模块")
             stop_event.set()
             return
         mp_hands = um.mp.solutions.hands
@@ -633,6 +676,16 @@ def detection_worker(
     last_hand_results = None
     track_state: Dict[int, dict] = {}
     next_track_id = 1
+
+    # MediaPipe 异步执行：用线程池让 CPU 手部检测和 NPU YOLO 推理重叠
+    _hand_executor = None
+    _hand_future = None
+    if hands is not None:
+        _hand_executor = ThreadPoolExecutor(max_workers=1)
+
+    def _run_mediapipe(bgr_frame):
+        rgb = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
+        return hands.process(rgb)
 
     try:
         while not stop_event.is_set():
@@ -655,6 +708,19 @@ def detection_worker(
 
             h_orig, w_orig = frame.shape[:2]
             seq_captured = seq
+
+            # 启动 MediaPipe 异步推理（与 YOLO 并行）
+            if _hand_executor is not None:
+                should_detect_hand = seq % 2 == 0
+                if should_detect_hand:
+                    if _hand_future is not None and _hand_future.done():
+                        try:
+                            last_hand_results = _hand_future.result()
+                        except Exception:
+                            pass
+                    _hand_future = _hand_executor.submit(_run_mediapipe, frame)
+
+            # YOLO 推理（NPU，与上面的 MediaPipe CPU 推理并行）
             if yolo_backend == "acl":
                 img_yolo = um.prepare_acl_yolo_input(frame, args.yolo_acl_input_format)
                 yolo_t0 = time.time()
@@ -684,8 +750,11 @@ def detection_worker(
                 objects = yolo_model.infer(frame, args.conf_thres)
                 yolo_ms = (time.time() - yolo_t0) * 1000.0
 
-            # 跳帧：若推理期间相机已更新 ≥2 帧，丢弃过时结果并立即处理最新帧
-            if int(frame_seq.value) >= seq_captured + 2:
+            # 丢弃严重过时的检测结果；对较慢模型保留一个更宽松的提交窗口。
+            if should_drop_stale_detection_result(
+                seq_captured=seq_captured,
+                latest_frame_seq=int(frame_seq.value),
+            ):
                 continue
 
             objects, track_state, next_track_id = um.assign_track_ids(
@@ -698,55 +767,25 @@ def detection_worker(
             danger_obj = None
             depth_frame = DepthFrameProxy(depth_map, float(get_shared_value(runtime.depth_scale))) if depth_enabled else None
 
-            if args.disable_hand:
-                hand_ms = 0.0
-            elif pose_model is not None:
-                should_detect_pose = seq % (args.pose_infer_skip + 1) == 0
-                pose_t0 = time.time()
-                if should_detect_pose:
-                    img_pose = cv2.resize(frame, (640, 640)).astype(np.uint8)
-                    outputs = pose_model.execute(img_pose)
-                    pose_results_new = um.postprocess_pose(outputs or [], frame.shape, conf_thres=args.pose_conf_thres)
-                else:
-                    pose_results_new = None
-                hand_ms = (time.time() - pose_t0) * 1000.0
-                if pose_results_new is not None:
-                    last_hand_results = pose_results_new
-                hand_results = last_hand_results if last_hand_results is not None else []
-                hand_count = len(hand_results)
-                if distance_detection_enabled and depth_frame is not None:
-                    for person in hand_results:
-                        wrists = um.extract_pose_wrists(person, depth_frame, conf_thres=args.pose_conf_thres)
-                        for wrist in wrists:
-                            wx, wy = wrist["pixel"]
-                            depth_mm = wrist["depth_mm"]
-                            if depth_mm > 0 and (min_depth_mm is None or depth_mm < min_depth_mm):
-                                min_depth_mm = depth_mm
-                            if depth_mm > 0 and depth_mm < args.danger_distance:
-                                is_danger = True
-                                near_obj, obj = um.check_hand_near_objects((wx, wy), depth_mm, objects, args.danger_distance)
-                                if near_obj:
-                                    danger_obj = obj
-            else:
-                should_detect_hand = seq % 3 == 0
-                hand_t0 = time.time()
-                if should_detect_hand:
-                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    hand_results_new = hands.process(frame_rgb)
-                else:
-                    hand_results_new = None
-                hand_ms = (time.time() - hand_t0) * 1000.0
-                if hand_results_new is not None:
-                    last_hand_results = hand_results_new
+            # 收集异步 MediaPipe 结果
+            hand_ms = 0.0
+            if _hand_executor is not None:
                 hand_results = last_hand_results
-                if hand_results is not None and hand_results.multi_hand_landmarks:
+            elif args.disable_hand:
+                hand_ms = 0.0
+                hand_results = None
+            else:
+                hand_results = None
+
+            # MediaPipe 异步结果的距离检测
+            if _hand_executor is not None and hand_results is not None:
+                if hasattr(hand_results, "multi_hand_landmarks") and hand_results.multi_hand_landmarks:
                     hand_count = len(hand_results.multi_hand_landmarks)
                     if distance_detection_enabled and depth_frame is not None:
                         for hand_landmarks in hand_results.multi_hand_landmarks:
                             wrist = hand_landmarks.landmark[0]
-                            wx, wy = int(wrist.x * w_orig), int(wrist.y * h_orig)
-                            wx = max(0, min(w_orig - 1, wx))
-                            wy = max(0, min(h_orig - 1, wy))
+                            wx = max(0, min(w_orig - 1, int(wrist.x * w_orig)))
+                            wy = max(0, min(h_orig - 1, int(wrist.y * h_orig)))
                             depth_mm = depth_frame.get_distance(wx, wy) * 1000.0
                             if depth_mm > 0 and (min_depth_mm is None or depth_mm < min_depth_mm):
                                 min_depth_mm = depth_mm
@@ -772,6 +811,22 @@ def detection_worker(
                 text = f"DANGER {danger_obj['name']}" if danger_obj else "DANGER"
                 cv2.putText(annotated, text, (30, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 3)
             um.draw_object_annotations(annotated, objects, highlighted_track_ids=highlighted_ids)
+
+            # 收集手腕标注数据供 writer 间隔帧重绘
+            _wrist_annotations: list[dict] = []
+            if not args.disable_hand and hand_results is not None:
+                if hasattr(hand_results, "multi_hand_landmarks") and hand_results.multi_hand_landmarks:
+                    _HAND_11 = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20]
+                    for hand_landmarks in hand_results.multi_hand_landmarks:
+                        lm = hand_landmarks.landmark
+                        pts = [(int(lm[i].x * w_orig), int(lm[i].y * h_orig)) for i in _HAND_11]
+                        wx, wy = max(0, min(w_orig - 1, pts[0][0])), max(0, min(h_orig - 1, pts[0][1]))
+                        d_mm = (depth_frame.get_distance(wx, wy) * 1000.0) if depth_frame is not None else 0.0
+                        _wrist_annotations.append({"px": wx, "py": wy, "depth_mm": d_mm, "hand_pts": pts})
+
+            # 绘制手部标注到 annotated 帧
+            if _wrist_annotations:
+                _draw_wrist_annotations(annotated, _wrist_annotations, args.danger_distance)
             overlay = None
             if args.write_debug_assets:
                 overlay = um.build_debug_overlay(w_orig, h_orig, objects, highlighted_track_ids=highlighted_ids)
@@ -793,6 +848,7 @@ def detection_worker(
                 "min_depth_mm": None if min_depth_mm is None else float(min_depth_mm),
                 "danger_object": danger_obj["name"] if danger_obj else None,
                 "ts": time.time(),
+                "wrist_annotations": _wrist_annotations,
             }
             put_latest_message(writer_queue, writer_snapshot)
             put_latest_message(
@@ -807,6 +863,8 @@ def detection_worker(
                 detect_seq.value += 1
             detect_ready_event.set()
     finally:
+        if _hand_executor is not None:
+            _hand_executor.shutdown(wait=False)
         if hands is not None:
             hands.close()
         color_shm.close()
@@ -900,69 +958,98 @@ def laser_worker(args, runtime, laser_queue, stop_event, worker_cpu):
             laser_marked = False
             if now - last_laser_time >= args.laser_update_interval:
                 if current_candidates and not is_danger:
-                    obj = current_candidates[0]
-                    target_track_id = obj["track_id"]
-                    target_box = um.expand_box(obj["box"], args.laser_box_scale)
-
-                    # 坐标外推：补偿推理延迟导致的目标位置滞后
-                    detect_ts = latest_payload.get("detect_ts", now)
-                    cx = (target_box[0] + target_box[2]) / 2.0
-                    cy = (target_box[1] + target_box[3]) / 2.0
-                    if target_track_id in _extrap_state:
-                        prev_cx, prev_cy, prev_ts = _extrap_state[target_track_id]
-                        dt_detect = detect_ts - prev_ts
-                        if 0 < dt_detect < 0.5:
-                            vx = (cx - prev_cx) / dt_detect
-                            vy = (cy - prev_cy) / dt_detect
-                            if abs(vx) <= 600 and abs(vy) <= 600:
-                                dt_lag = max(0.0, now - detect_ts)
-                                sx, sy = vx * dt_lag, vy * dt_lag
-                                target_box = [
-                                    target_box[0] + sx, target_box[1] + sy,
-                                    target_box[2] + sx, target_box[3] + sy,
-                                ]
-                    _extrap_state[target_track_id] = (cx, cy, detect_ts)
-
-                    if last_laser_box is not None and last_laser_track_id == target_track_id:
-                        target_box = um.smooth_box(last_laser_box, target_box, args.laser_smoothing_alpha)
-
-                    needs_refresh = (
-                        not laser_active
-                        or last_laser_box is None
-                        or last_laser_track_id != target_track_id
-                        or um.should_refresh_laser_box(
-                            last_laser_box,
-                            target_box,
-                            center_threshold_px=args.laser_center_threshold_px,
-                            size_threshold_ratio=args.laser_size_threshold_ratio,
-                        )
-                        or (now - last_force_refresh_time) >= args.laser_force_refresh_interval
-                    )
-                    if needs_refresh:
+                    if selected_track_id is None and len(current_candidates) > 1:
                         try:
                             galvo.task_index = 0
-                            _, effective_marker_style = _resolve_marker_style(marker_state, obj)
                             galvo.begin_batch()
-                            emit_marker_command(
-                                galvo,
-                                effective_marker_style,
-                                target_box,
-                                frame_width=FRAME_WIDTH,
-                                frame_height=FRAME_HEIGHT,
-                            )
+                            target_track_ids: Set[int] = set()
+                            for obj in current_candidates[: args.max_laser_targets]:
+                                target_box = um.expand_box(obj["box"], args.laser_box_scale)
+                                _, effective_marker_style = _resolve_marker_style(marker_state, obj)
+                                emit_marker_command(
+                                    galvo,
+                                    effective_marker_style,
+                                    target_box,
+                                    frame_width=FRAME_WIDTH,
+                                    frame_height=FRAME_HEIGHT,
+                                    software_sweep=False,
+                                )
+                                target_track_ids.add(int(obj["track_id"]))
                             galvo.update_tasks()  # 批量刷新：cmd + U; 合并单次写入
-                            laser_marked = True
-                            laser_active = True
-                            locked_track_ids = {target_track_id}
-                            last_laser_box = list(target_box)
-                            last_laser_track_id = target_track_id
+                            laser_marked = bool(target_track_ids)
+                            laser_active = bool(target_track_ids)
+                            locked_track_ids = target_track_ids
+                            last_laser_box = None
+                            last_laser_track_id = None
                             last_laser_time = now
                             last_force_refresh_time = now
                         except Exception as exc:
                             write_text_slot(runtime.laser_error, repr(exc))
                     else:
-                        laser_active = True
-                        locked_track_ids = {target_track_id}
+                        obj = current_candidates[0]
+                        target_track_id = obj["track_id"]
+                        target_box = um.expand_box(obj["box"], args.laser_box_scale)
+
+                        # 坐标外推：补偿推理延迟导致的目标位置滞后
+                        detect_ts = latest_payload.get("detect_ts", now)
+                        cx = (target_box[0] + target_box[2]) / 2.0
+                        cy = (target_box[1] + target_box[3]) / 2.0
+                        if target_track_id in _extrap_state:
+                            prev_cx, prev_cy, prev_ts = _extrap_state[target_track_id]
+                            dt_detect = detect_ts - prev_ts
+                            if 0 < dt_detect < 0.5:
+                                vx = (cx - prev_cx) / dt_detect
+                                vy = (cy - prev_cy) / dt_detect
+                                if abs(vx) <= 600 and abs(vy) <= 600:
+                                    dt_lag = max(0.0, now - detect_ts)
+                                    sx, sy = vx * dt_lag, vy * dt_lag
+                                    target_box = [
+                                        target_box[0] + sx, target_box[1] + sy,
+                                        target_box[2] + sx, target_box[3] + sy,
+                                    ]
+                        _extrap_state[target_track_id] = (cx, cy, detect_ts)
+
+                        if last_laser_box is not None and last_laser_track_id == target_track_id:
+                            target_box = um.smooth_box(last_laser_box, target_box, args.laser_smoothing_alpha)
+
+                        needs_refresh = (
+                            not laser_active
+                            or last_laser_box is None
+                            or last_laser_track_id != target_track_id
+                            or um.should_refresh_laser_box(
+                                last_laser_box,
+                                target_box,
+                                center_threshold_px=args.laser_center_threshold_px,
+                                size_threshold_ratio=args.laser_size_threshold_ratio,
+                            )
+                            or (now - last_force_refresh_time) >= args.laser_force_refresh_interval
+                        )
+                        if needs_refresh:
+                            try:
+                                galvo.task_index = 0
+                                _, effective_marker_style = _resolve_marker_style(marker_state, obj)
+                                galvo.begin_batch()
+                                emit_marker_command(
+                                    galvo,
+                                    effective_marker_style,
+                                    target_box,
+                                    frame_width=FRAME_WIDTH,
+                                    frame_height=FRAME_HEIGHT,
+                                    software_sweep=(effective_marker_style == "rectangle"),
+                                )
+                                galvo.update_tasks()  # 批量刷新：cmd + U; 合并单次写入
+                                laser_marked = True
+                                laser_active = True
+                                locked_track_ids = {target_track_id}
+                                last_laser_box = list(target_box)
+                                last_laser_track_id = target_track_id
+                                last_laser_time = now
+                                last_force_refresh_time = now
+                            except Exception as exc:
+                                write_text_slot(runtime.laser_error, repr(exc))
+                        else:
+                            laser_active = True
+                            locked_track_ids = {target_track_id}
                 elif laser_active:
                     try:
                         galvo.update_tasks()
@@ -1020,44 +1107,53 @@ def writer_worker(
     webui_artifacts = build_webui_artifact_plan(write_debug_assets)
     um.cleanup_optional_webui_artifacts(web_dir, webui_artifacts)
     ict_root = Path.home() / "ICT"
+    video_stream_enabled = bool(config_snapshot.get("enable_video_stream", True))
+    if not video_stream_enabled:
+        try:
+            (web_dir / "frame.jpg").unlink()
+        except FileNotFoundError:
+            pass
 
     # --- DVPP + WebSocket encoder init (three-tier graceful degradation) ---
     jpege = h264_encoder = broadcaster = None
-    try:
-        import acl as _acl
-        _acl.init()
-        _acl.rt.set_device(0)
-        _acl.rt.create_context(0)
-    except Exception:
-        pass
-    try:
-        from dvpp_stream import DvppJpegEncoder
-        jpege = DvppJpegEncoder(FRAME_WIDTH, FRAME_HEIGHT)
-        print("[writer] DVPP JPEGE encoder ready", flush=True)
-    except Exception as e:
-        print(f"[writer] DVPP JPEGE unavailable, fallback cv2: {e}", flush=True)
+    if video_stream_enabled:
+        try:
+            import acl as _acl
+            _acl.init()
+            _acl.rt.set_device(0)
+            _acl.rt.create_context(0)
+        except Exception:
+            pass
+        try:
+            from dvpp_stream import DvppJpegEncoder
+            jpege = DvppJpegEncoder(FRAME_WIDTH, FRAME_HEIGHT)
+            print("[writer] DVPP JPEGE encoder ready", flush=True)
+        except Exception as e:
+            print(f"[writer] DVPP JPEGE unavailable, fallback cv2: {e}", flush=True)
 
-    h264_backend = "disabled"
-    stream_codec = "mjpeg"
-    if h264_stream_enabled():
-        h264_encoder, h264_backend = init_h264_stream_encoder(FRAME_WIDTH, FRAME_HEIGHT, writer_fps)
-        if h264_encoder:
-            stream_codec = "h264"
-    try:
-        from dvpp_stream import WebSocketBroadcaster
-        broadcaster = WebSocketBroadcaster(
-            width=FRAME_WIDTH, height=FRAME_HEIGHT,
-            fps=int(max(writer_fps, 1)), port=ws_port,
-        )
-        broadcaster.set_codec(stream_codec)
-        broadcaster.start()
-        print(
-            f"[writer] WebSocket broadcaster on port {ws_port} "
-            f"(codec={stream_codec}, backend={h264_backend})",
-            flush=True,
-        )
-    except Exception as e:
-        print(f"[writer] WebSocket broadcaster unavailable: {e}", flush=True)
+        h264_backend = "disabled"
+        stream_codec = "mjpeg"
+        if h264_stream_enabled():
+            h264_encoder, h264_backend = init_h264_stream_encoder(FRAME_WIDTH, FRAME_HEIGHT, writer_fps)
+            if h264_encoder:
+                stream_codec = "h264"
+        try:
+            from dvpp_stream import WebSocketBroadcaster
+            broadcaster = WebSocketBroadcaster(
+                width=FRAME_WIDTH, height=FRAME_HEIGHT,
+                fps=int(max(writer_fps, 1)), port=ws_port,
+            )
+            broadcaster.set_codec(stream_codec)
+            broadcaster.start()
+            print(
+                f"[writer] WebSocket broadcaster on port {ws_port} "
+                f"(codec={stream_codec}, backend={h264_backend})",
+                flush=True,
+            )
+        except Exception as e:
+            print(f"[writer] WebSocket broadcaster unavailable: {e}", flush=True)
+    else:
+        print("[writer] video stream disabled, only state.json will be updated", flush=True)
 
     min_interval = 1.0 / max(writer_fps, 1.0)
     next_write_time = 0.0
@@ -1091,14 +1187,15 @@ def writer_worker(
             else:
                 annotated = render_live_frame_from_snapshot(raw_frame, latest_snapshot)
             jpeg_bytes = None
-            if jpege:
-                try:
-                    jpeg_bytes = jpege.encode(annotated)
-                    _safe_write_bytes(web_dir / "frame.jpg", jpeg_bytes)
-                except Exception:
-                    jpeg_bytes = None
-            if jpeg_bytes is None:
-                cv2.imwrite(str(web_dir / "frame.jpg"), annotated, [cv2.IMWRITE_JPEG_QUALITY, 75])
+            if video_stream_enabled:
+                if jpege:
+                    try:
+                        jpeg_bytes = jpege.encode(annotated)
+                        _safe_write_bytes(web_dir / "frame.jpg", jpeg_bytes)
+                    except Exception:
+                        jpeg_bytes = None
+                if jpeg_bytes is None:
+                    cv2.imwrite(str(web_dir / "frame.jpg"), annotated, [cv2.IMWRITE_JPEG_QUALITY, 75])
             if write_debug_assets and raw_frame is not None:
                 overlay = overlay_buf.copy()
                 cv2.imwrite(str(web_dir / "debug_frame.jpg"), raw_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
@@ -1166,6 +1263,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--writer-fps", type=float, default=25.0, help="WebUI 写图与状态输出频率")
     parser.add_argument("--ws-port", type=int, default=8003, help="WebSocket 推流端口")
     parser.add_argument("--cpu-affinity", choices=("auto", "off"), default="auto", help="Linux 下自动为采集/检测/写盘/激光分配 CPU 核")
+    parser.add_argument("--disable-video-stream", action="store_true", help="关闭 WebUI 视频帧输出，仅保留 state.json 与控制面")
     return parser
 
 
@@ -1193,10 +1291,10 @@ def main() -> None:
     config_snapshot = {
         "enable_hand_detection": not bool(args.disable_hand),
         "enable_distance_detection": not bool(args.disable_distance),
+        "enable_video_stream": not bool(args.disable_video_stream),
         "danger_distance": args.danger_distance,
         "conf_thres": args.conf_thres,
         "yolo_model": str(Path(args.yolo_model).name),
-        "pose_model": str(args.pose_model or ""),
         "data_yaml": str(args.data_yaml),
         "camera_serial": str(args.camera_serial or ""),
         "enable_laser": bool(args.enable_laser),

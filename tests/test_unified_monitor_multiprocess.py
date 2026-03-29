@@ -125,6 +125,101 @@ class UnifiedMonitorMultiprocessTest(unittest.TestCase):
 
         self.assertEqual(calls, ["unified_monitor"])
 
+    def test_should_drop_stale_detection_result_allows_moderate_lag(self):
+        module = load_module()
+
+        self.assertFalse(
+            module.should_drop_stale_detection_result(
+                seq_captured=10,
+                latest_frame_seq=14,
+            )
+        )
+
+    def test_should_drop_stale_detection_result_rejects_excessive_lag(self):
+        module = load_module()
+
+        self.assertTrue(
+            module.should_drop_stale_detection_result(
+                seq_captured=10,
+                latest_frame_seq=19,
+            )
+        )
+
+    def test_emit_marker_command_uses_software_sweep_for_single_target_rectangle(self):
+        module = load_module()
+
+        class _DummyGalvo:
+            def __init__(self):
+                self.calls = []
+
+            def draw_box_sweep(self, box, **kwargs):
+                self.calls.append(("sweep", list(box), kwargs))
+                return True
+
+            def draw_box(self, box, **kwargs):
+                self.calls.append(("box", list(box), kwargs))
+                return True
+
+            def draw_circle(self, *args, **kwargs):
+                self.calls.append(("circle", args, kwargs))
+                return True
+
+            def pixel_to_galvo(self, x, y, _frame_width, _frame_height):
+                return int(x), int(y)
+
+        galvo = _DummyGalvo()
+
+        ok = module.emit_marker_command(
+            galvo,
+            "rectangle",
+            [10.0, 20.0, 30.0, 40.0],
+            frame_width=640,
+            frame_height=480,
+            software_sweep=True,
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(len(galvo.calls), 1)
+        self.assertEqual(galvo.calls[0][0], "sweep")
+
+    def test_emit_marker_command_keeps_multi_target_rectangle_on_lightweight_box_command(self):
+        module = load_module()
+
+        class _DummyGalvo:
+            def __init__(self):
+                self.calls = []
+
+            def draw_box_sweep(self, box, **kwargs):
+                self.calls.append(("sweep", list(box), kwargs))
+                return True
+
+            def draw_box(self, box, **kwargs):
+                self.calls.append(("box", list(box), kwargs))
+                return True
+
+            def draw_circle(self, *args, **kwargs):
+                self.calls.append(("circle", args, kwargs))
+                return True
+
+            def pixel_to_galvo(self, x, y, _frame_width, _frame_height):
+                return int(x), int(y)
+
+        galvo = _DummyGalvo()
+
+        ok = module.emit_marker_command(
+            galvo,
+            "rectangle",
+            [10.0, 20.0, 30.0, 40.0],
+            frame_width=640,
+            frame_height=480,
+            software_sweep=False,
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(len(galvo.calls), 1)
+        self.assertEqual(galvo.calls[0][0], "box")
+        self.assertNotIn("task_index", galvo.calls[0][2])
+
 
 
     def test_capture_worker_resolves_camera_serial_without_importing_unified_monitor(self):
@@ -408,6 +503,133 @@ class UnifiedMonitorMultiprocessTest(unittest.TestCase):
         self.assertTrue(module.get_shared_bool(runtime.laser_marked))
         self.assertEqual(module.read_text_slot(runtime.laser_error), "")
 
+    def test_laser_worker_batches_multiple_targets_when_no_manual_selection(self):
+        module = load_module()
+        ctx = mp.get_context("fork" if "fork" in mp.get_all_start_methods() else mp.get_start_method())
+        runtime = module.create_runtime_shared_state(ctx, laser_enabled=True)
+        laser_queue = queue.Queue()
+        stop_event = ctx.Event()
+        laser_queue.put(
+            {
+                "laser_objects": [
+                    {
+                        "track_id": 7,
+                        "score": 0.99,
+                        "cls": 0,
+                        "name": "fpga",
+                        "box": [10.0, 20.0, 30.0, 40.0],
+                    },
+                    {
+                        "track_id": 8,
+                        "score": 0.95,
+                        "cls": 3,
+                        "name": "stlink",
+                        "box": [50.0, 60.0, 90.0, 120.0],
+                    },
+                ],
+                "is_danger": False,
+                "detect_ts": 1.0,
+            }
+        )
+
+        class _DummyUm:
+            def select_laser_targets(self, objects, **_kwargs):
+                return list(objects)
+
+            def expand_box(self, box, _scale):
+                return list(box)
+
+            def smooth_box(self, _last_box, box, _alpha):
+                return list(box)
+
+            def should_refresh_laser_box(self, *_args, **_kwargs):
+                return True
+
+        class _DummyGalvo:
+            instances = []
+
+            def __init__(self, *args, **kwargs):
+                self.task_index = 0
+                self.draw_calls = []
+                _DummyGalvo.instances.append(self)
+
+            def connect(self):
+                return True
+
+            def disconnect(self):
+                return None
+
+            def pixel_to_galvo(self, x, y, _frame_width, _frame_height):
+                return int(x), int(y)
+
+            def draw_circle(self, x, y, radius, task_index=None):
+                self.draw_calls.append(("circle", x, y, radius, task_index))
+                return True
+
+            def draw_box_sweep(self, box, **kwargs):
+                self.draw_calls.append(("sweep", list(box), kwargs))
+                return True
+
+            def draw_box(self, box, **kwargs):
+                self.draw_calls.append(("box", list(box), kwargs))
+                return True
+
+            def begin_batch(self):
+                return None
+
+            def update_tasks(self):
+                stop_event.set()
+
+        class _Args:
+            enable_laser = True
+            laser_serial = "/dev/ttyUSB0"
+            laser_baudrate = 115200
+            laser_calibration = "/tmp/fake_galvo.yaml"
+            laser_update_interval = 0.0
+            laser_force_refresh_interval = 0.01
+            laser_min_score = 0.7
+            max_laser_targets = 2
+            laser_target_classes = None
+            laser_box_scale = 1.0
+            laser_smoothing_alpha = 0.0
+            laser_center_threshold_px = 1.0
+            laser_size_threshold_ratio = 0.01
+
+        original_get_um = module._get_um_module
+        original_load_marker_state = module.cp.load_marker_state
+        original_affinity = module.apply_worker_cpu_affinity
+        saved_galvo_module = sys.modules.get("galvo_controller")
+
+        module._get_um_module = lambda: _DummyUm()
+        module.cp.load_marker_state = lambda _ict_root: {
+            "selected_track_id": None,
+            "marker_style": "rectangle",
+            "class_config": {},
+        }
+        module.apply_worker_cpu_affinity = lambda *_args, **_kwargs: None
+        sys.modules["galvo_controller"] = type(
+            "_FakeGalvoModuleMulti",
+            (),
+            {"LaserGalvoController": _DummyGalvo},
+        )
+
+        try:
+            module.laser_worker(_Args(), runtime, laser_queue, stop_event, worker_cpu=None)
+        finally:
+            module._get_um_module = original_get_um
+            module.cp.load_marker_state = original_load_marker_state
+            module.apply_worker_cpu_affinity = original_affinity
+            if saved_galvo_module is None:
+                sys.modules.pop("galvo_controller", None)
+            else:
+                sys.modules["galvo_controller"] = saved_galvo_module
+
+        self.assertEqual(len(_DummyGalvo.instances), 1)
+        self.assertEqual(len(_DummyGalvo.instances[0].draw_calls), 2)
+        self.assertTrue(all(call[0] == "box" for call in _DummyGalvo.instances[0].draw_calls))
+        self.assertTrue(all("task_index" not in call[2] for call in _DummyGalvo.instances[0].draw_calls))
+        self.assertEqual(module.read_json_slot(runtime.locked_track_ids, []), [7, 8])
+
     def test_build_arg_parser_disables_debug_assets_by_default(self):
         module = load_module()
         parser = module.build_arg_parser()
@@ -417,6 +639,14 @@ class UnifiedMonitorMultiprocessTest(unittest.TestCase):
         self.assertFalse(args.write_debug_assets)
         self.assertEqual(args.writer_fps, 25.0)
         self.assertEqual(args.camera_serial, "")
+
+    def test_build_arg_parser_defaults_to_multi_target_laser(self):
+        module = load_module()
+        parser = module.build_arg_parser()
+
+        args = parser.parse_args(["--yolo-model", "det.om", "--data-yaml", "cfg.yaml"])
+
+        self.assertEqual(args.max_laser_targets, 10)
 
     def test_build_webui_artifact_plan_skips_debug_assets_by_default(self):
         module = load_module()
@@ -619,6 +849,78 @@ class UnifiedMonitorMultiprocessTest(unittest.TestCase):
             module.Path.home = original_home
             module.cv2.imwrite = original_imwrite
             module.json.dump = original_dump
+            tmpdir.cleanup()
+
+    def test_writer_worker_skips_frame_output_when_video_stream_disabled(self):
+        module = load_module()
+
+        class _DummyShm:
+            def close(self):
+                return None
+
+        def _attach(_name, shape, dtype):
+            return _DummyShm(), np.zeros(shape, dtype=dtype)
+
+        original_attach = module.attach_shared_buffer
+        original_home = module.Path.home
+        original_imwrite = module.cv2.imwrite
+        original_dump = module.json.dump
+        original_safe_write = module._safe_write_bytes
+        module.attach_shared_buffer = _attach
+        written_paths = []
+        module.cv2.imwrite = lambda path, *_args, **_kwargs: written_paths.append(Path(path).name) or True
+        module._safe_write_bytes = lambda path, _data: written_paths.append(Path(path).name)
+        tmpdir = tempfile.TemporaryDirectory()
+        module.Path.home = classmethod(lambda cls: Path(tmpdir.name))
+        try:
+            ctx = mp.get_context("fork" if "fork" in mp.get_all_start_methods() else mp.get_start_method())
+            stop_event = ctx.Event()
+            runtime = module.create_runtime_shared_state(ctx, laser_enabled=False)
+
+            writer_queue = queue.Queue(maxsize=1)
+            writer_queue.put({"fps": 15.0, "yolo_ms": 6.0, "hand_ms": 0.0, "objects": 0, "object_details": []})
+
+            def _dump(payload, handle, *args, **kwargs):
+                original_dump(payload, handle, *args, **kwargs)
+                stop_event.set()
+
+            module.json.dump = _dump
+
+            detect_ready_evt = ctx.Event()
+            detect_ready_evt.set()
+            module.writer_worker(
+                "color",
+                "annotated",
+                "overlay",
+                ctx.Value("i", 3),
+                ctx.Value("i", 1),
+                detect_ready_evt,
+                runtime,
+                ["fpga"],
+                writer_queue,
+                stop_event,
+                writer_fps=10.0,
+                worker_cpu=None,
+                write_debug_assets=False,
+                config_snapshot={
+                    "danger_distance": 300,
+                    "conf_thres": 0.55,
+                    "yolo_model": "det.om",
+                    "enable_video_stream": False,
+                },
+            )
+
+            state_path = Path(tmpdir.name) / "ICT" / "webui_http_unified" / "state.json"
+            payload = module.json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertFalse(payload["config"]["enable_video_stream"])
+            self.assertNotIn("frame.jpg", written_paths)
+            self.assertFalse((Path(tmpdir.name) / "ICT" / "webui_http_unified" / "frame.jpg").exists())
+        finally:
+            module.attach_shared_buffer = original_attach
+            module.Path.home = original_home
+            module.cv2.imwrite = original_imwrite
+            module.json.dump = original_dump
+            module._safe_write_bytes = original_safe_write
             tmpdir.cleanup()
 
     def test_serialize_objects_for_state_marks_locked_objects(self):

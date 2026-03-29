@@ -28,11 +28,13 @@ class UnifiedControlPlaneTest(unittest.TestCase):
 
             config = module.load_runtime_config(root)
 
-            self.assertIn("danger_distance", config)
-            self.assertIn("conf_thres", config)
-            self.assertIn("camera_serial", config)
-            self.assertIn("marker_style", config)
-            self.assertEqual(config["marker_style"], "rectangle")
+        self.assertIn("danger_distance", config)
+        self.assertIn("conf_thres", config)
+        self.assertIn("camera_serial", config)
+        self.assertIn("marker_style", config)
+        self.assertIn("enable_video_stream", config)
+        self.assertEqual(config["marker_style"], "rectangle")
+        self.assertTrue(config["enable_video_stream"])
 
     def test_list_model_candidates_prefers_yolo26m(self):
         module = load_module()

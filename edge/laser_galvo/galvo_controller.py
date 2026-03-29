@@ -176,6 +176,120 @@ class LaserGalvoController:
         cmd = f"{task_index}C,{x_galvo},{y_galvo},{radius}"
         return self._send_text_command(cmd)
 
+    def _project_box_corners(
+        self,
+        box,
+        *,
+        pixel_coords: bool,
+        image_width: int = 640,
+        image_height: int = 480,
+    ):
+        """将框的四个角点转换到振镜坐标，顺序为左上、右上、右下、左下。"""
+        x1, y1, x2, y2 = [float(v) for v in box]
+        if not pixel_coords:
+            return [
+                (int(round(x1)), int(round(y1))),
+                (int(round(x2)), int(round(y1))),
+                (int(round(x2)), int(round(y2))),
+                (int(round(x1)), int(round(y2))),
+            ]
+
+        if self.homography_matrix is not None:
+            pixel_corners = np.array(
+                [[[x1, y1]], [[x2, y1]], [[x2, y2]], [[x1, y2]]],
+                dtype=np.float32,
+            )
+            galvo_corners = cv2.perspectiveTransform(pixel_corners, self.homography_matrix).reshape(-1, 2)
+            return [
+                (
+                    int(np.clip(round(float(pt[0])), -32768, 32767)),
+                    int(np.clip(round(float(pt[1])), -32768, 32767)),
+                )
+                for pt in galvo_corners
+            ]
+
+        return [
+            self.pixel_to_galvo(x1, y1, image_width, image_height),
+            self.pixel_to_galvo(x2, y1, image_width, image_height),
+            self.pixel_to_galvo(x2, y2, image_width, image_height),
+            self.pixel_to_galvo(x1, y2, image_width, image_height),
+        ]
+
+    def draw_box_sweep(
+        self,
+        box,
+        *,
+        pixel_coords: bool = True,
+        task_index=None,
+        image_width: int = 640,
+        image_height: int = 480,
+        max_tasks: int = 8,
+        min_radius: int = 450,
+        max_radius: int = 1400,
+    ):
+        """
+        用多个圆形任务沿矩形四边采样，近似旧版逐边扫框效果。
+
+        这样不依赖 STM32 的 `R` 实现质量，适合作为单目标演示模式。
+        """
+        start_index = self.task_index if task_index is None else int(task_index)
+        max_slots = max(1, 10 - start_index)
+        sample_budget = max(4, min(int(max_tasks), max_slots))
+        corners = self._project_box_corners(
+            box,
+            pixel_coords=pixel_coords,
+            image_width=image_width,
+            image_height=image_height,
+        )
+        closed = corners + [corners[0]]
+        edge_lengths = [
+            float(np.hypot(closed[i + 1][0] - closed[i][0], closed[i + 1][1] - closed[i][1]))
+            for i in range(4)
+        ]
+        total_length = sum(edge_lengths)
+        if total_length <= 0:
+            cx = sum(pt[0] for pt in corners) / 4.0
+            cy = sum(pt[1] for pt in corners) / 4.0
+            return self.draw_circle(int(round(cx)), int(round(cy)), min_radius, task_index=start_index)
+
+        allocations = [1, 1, 1, 1]
+        remaining = sample_budget - 4
+        while remaining > 0:
+            edge_idx = int(np.argmax(edge_lengths))
+            allocations[edge_idx] += 1
+            # 轻微衰减，避免额外点全部堆到最长边。
+            edge_lengths[edge_idx] *= 0.82
+            remaining -= 1
+
+        sampled_points = []
+        for edge_idx, samples in enumerate(allocations):
+            start = np.array(closed[edge_idx], dtype=np.float32)
+            end = np.array(closed[edge_idx + 1], dtype=np.float32)
+            for step in range(samples):
+                t = step / float(samples)
+                point = start * (1.0 - t) + end * t
+                rounded = (int(round(float(point[0]))), int(round(float(point[1]))))
+                if not sampled_points or sampled_points[-1] != rounded:
+                    sampled_points.append(rounded)
+
+        if len(sampled_points) > sample_budget:
+            sampled_points = sampled_points[:sample_budget]
+
+        if len(sampled_points) >= 2:
+            gap = min(
+                float(np.hypot(b[0] - a[0], b[1] - a[1]))
+                for a, b in zip(sampled_points, sampled_points[1:] + sampled_points[:1])
+                if a != b
+            )
+        else:
+            gap = float(min_radius * 2)
+        radius = int(np.clip(gap * 0.45, min_radius, max_radius))
+
+        ok = True
+        for offset, (gx, gy) in enumerate(sampled_points):
+            ok = self.draw_circle(gx, gy, radius, task_index=start_index + offset) and ok
+        return ok
+
     def draw_box(
         self,
         box,
@@ -207,14 +321,34 @@ class LaserGalvoController:
             width_pixel = abs(x2 - x1)
             height_pixel = abs(y2 - y1)
 
-            # 转换中心点到振镜坐标
-            center_x_galvo, center_y_galvo = self.pixel_to_galvo(
-                center_x_pixel, center_y_pixel, image_width, image_height
-            )
+            if self.homography_matrix is not None:
+                # 中心：直接投影像素中心，避免 AABB 中心在透视变换下偏离真实投影位置
+                center_x_galvo, center_y_galvo = self.pixel_to_galvo(
+                    center_x_pixel, center_y_pixel, image_width, image_height
+                )
+                # 宽高：仍用四角投影后的 AABB 包围盒（STM32 R 命令只支持轴对齐矩形）
+                galvo_corners = np.array(
+                    self._project_box_corners(
+                        box,
+                        pixel_coords=True,
+                        image_width=image_width,
+                        image_height=image_height,
+                    ),
+                    dtype=np.float32,
+                )
+                min_x, min_y = galvo_corners.min(axis=0)
+                max_x, max_y = galvo_corners.max(axis=0)
+                width_galvo = int(round(max(1.0, max_x - min_x)))
+                height_galvo = int(round(max(1.0, max_y - min_y)))
+            else:
+                # 转换中心点到振镜坐标
+                center_x_galvo, center_y_galvo = self.pixel_to_galvo(
+                    center_x_pixel, center_y_pixel, image_width, image_height
+                )
 
-            # 计算振镜坐标系中的宽度和高度（使用映射系数）
-            width_galvo = int(width_pixel * 102.4)
-            height_galvo = int(height_pixel * 136.5)
+                # 无标定时退回线性比例近似。
+                width_galvo = int(width_pixel * 102.4)
+                height_galvo = int(height_pixel * 136.5)
         else:
             # 已经是振镜坐标
             center_x_galvo = int((x1 + x2) / 2)

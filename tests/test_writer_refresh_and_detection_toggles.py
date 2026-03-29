@@ -73,6 +73,7 @@ class WriterRefreshAndDetectionTogglesTest(unittest.TestCase):
 
         self.assertFalse(config["enable_hand_detection"])
         self.assertFalse(config["enable_distance_detection"])
+        self.assertTrue(config["enable_video_stream"])
 
     def test_shell_env_exports_include_detection_toggle_flags(self):
         module = load_module("control_plane_toggle_exports_test", CONTROL_TARGET)
@@ -114,6 +115,7 @@ class WriterRefreshAndDetectionTogglesTest(unittest.TestCase):
 
         self.assertIn('id="config-enable-hand-detection"', html)
         self.assertIn('id="config-enable-distance-detection"', html)
+        self.assertIn('id="config-enable-video-stream"', html)
         self.assertRegex(
             html,
             re.compile(r"enable_hand_detection:\s*Boolean\(DOM\.configEnableHandDetection\.checked\)"),
@@ -121,6 +123,10 @@ class WriterRefreshAndDetectionTogglesTest(unittest.TestCase):
         self.assertRegex(
             html,
             re.compile(r"enable_distance_detection:\s*Boolean\(DOM\.configEnableDistanceDetection\.checked\)"),
+        )
+        self.assertRegex(
+            html,
+            re.compile(r"enable_video_stream:\s*Boolean\(DOM\.configEnableVideoStream\.checked\)"),
         )
 
 

@@ -358,36 +358,38 @@ class GalvoCalibrator:
         galvo_pts = np.array(galvo_points, dtype=np.float32)
         pixel_pts = np.array(source_points, dtype=np.float32)
 
-        # 目标映射仍然是 pixel -> galvo，但 RANSAC 阈值应在像素域衡量。
-        # 因此先拟合 galvo -> pixel，再反求逆矩阵，避免 galvo 坐标量级过大时
-        # 单个坏点把整张映射拖垮。
+        # 两步法：RANSAC 在像素域筛 inlier，然后用 inlier 直接拟合 pixel→galvo。
+        # 之前的做法是先拟合 galvo→pixel 再求逆，但 inv() 会放大数值误差
+        # （galvo 量级 ±15000 vs pixel 量级 0-640），导致系统性中心偏移。
         ransac_threshold_px = max(
             10.0,
             float(self.detector_profile.get("ransac_reproj_threshold", 10.0)),
         )
-        homography_galvo_to_pixel, mask = cv2.findHomography(
+
+        # 第一步：galvo→pixel 方向 RANSAC，仅用于筛选 inlier
+        _, mask = cv2.findHomography(
             galvo_pts,
             pixel_pts,
             cv2.RANSAC,
             ransac_threshold_px,
         )
 
-        inlier_mask = None
-        homography = None
-        if homography_galvo_to_pixel is not None:
-            try:
-                homography = np.linalg.inv(homography_galvo_to_pixel)
-                inlier_mask = mask.reshape(-1).astype(bool) if mask is not None else None
-            except np.linalg.LinAlgError:
-                homography = None
-                inlier_mask = None
+        if mask is not None and np.count_nonzero(mask) >= 4:
+            inlier_mask = mask.reshape(-1).astype(bool)
+        else:
+            inlier_mask = np.ones(len(galvo_pts), dtype=bool)
 
+        # 第二步：用 inlier 直接拟合 pixel→galvo（消除矩阵求逆）
+        homography, _ = cv2.findHomography(
+            pixel_pts[inlier_mask], galvo_pts[inlier_mask], 0
+        )
         if homography is None:
+            # 兜底：用全部点拟合
             homography, _ = cv2.findHomography(pixel_pts, galvo_pts, 0)
+            inlier_mask = np.ones(len(galvo_pts), dtype=bool)
             if homography is None:
                 self.last_failure_reason = "单应性矩阵计算失败"
                 return False
-            inlier_mask = np.ones(len(galvo_pts), dtype=bool)
 
         pred = cv2.perspectiveTransform(pixel_pts.reshape(-1, 1, 2), homography).reshape(-1, 2)
         errors = np.linalg.norm(pred - galvo_pts, axis=1)

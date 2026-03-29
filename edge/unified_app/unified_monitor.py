@@ -420,87 +420,6 @@ def postprocess_yolov10(
     return dets
 
 
-def postprocess_pose(
-    outputs: Sequence[np.ndarray],
-    img_shape: Tuple[int, int, int],
-    conf_thres: float = 0.5,
-) -> List[dict]:
-    """
-    YOLOv8-pose 后处理。
-
-    输出格式:
-      56 = 4(bbox) + 1(conf) + 51(17 * 3 关键点)
-    """
-    if not outputs:
-        return []
-
-    pred = outputs[0].reshape(56, -1).T
-    boxes_xywh = pred[:, :4]
-    confs = 1.0 / (1.0 + np.exp(-pred[:, 4]))
-    keypoints_raw = pred[:, 5:]
-
-    mask = confs >= conf_thres
-    boxes_xywh = boxes_xywh[mask]
-    confs = confs[mask]
-    keypoints_raw = keypoints_raw[mask]
-
-    if len(boxes_xywh) == 0:
-        return []
-
-    boxes_xyxy = np.zeros_like(boxes_xywh)
-    boxes_xyxy[:, 0] = boxes_xywh[:, 0] - boxes_xywh[:, 2] / 2
-    boxes_xyxy[:, 1] = boxes_xywh[:, 1] - boxes_xywh[:, 3] / 2
-    boxes_xyxy[:, 2] = boxes_xywh[:, 0] + boxes_xywh[:, 2] / 2
-    boxes_xyxy[:, 3] = boxes_xywh[:, 1] + boxes_xywh[:, 3] / 2
-
-    h, w = img_shape[:2]
-    boxes_xyxy[:, [0, 2]] *= w / 640.0
-    boxes_xyxy[:, [1, 3]] *= h / 640.0
-
-    results = []
-    for i in range(len(boxes_xyxy)):
-        kpts = keypoints_raw[i].reshape(17, 3)
-        kpts[:, 0] *= w / 640.0
-        kpts[:, 1] *= h / 640.0
-        results.append(
-            {
-                "box": boxes_xyxy[i].tolist(),
-                "conf": float(confs[i]),
-                "keypoints": kpts.tolist(),
-            }
-        )
-    return results
-
-
-def extract_pose_wrists(
-    person_det: dict,
-    depth_frame,
-    conf_thres: float = 0.5,
-) -> List[dict]:
-    """提取 pose 结果中的左右手腕像素坐标和深度。"""
-    keypoints = np.asarray(person_det.get("keypoints", []), dtype=np.float32)
-    if keypoints.shape != (17, 3):
-        return []
-
-    wrists = []
-    for idx in (9, 10):
-        x, y, conf = keypoints[idx]
-        if conf < conf_thres:
-            continue
-        px, py = int(round(float(x))), int(round(float(y)))
-        depth_m = depth_frame.get_distance(px, py)
-        depth_mm = float(depth_m * 1000.0)
-        wrists.append(
-            {
-                "index": idx,
-                "pixel": (px, py),
-                "conf": float(conf),
-                "depth_mm": depth_mm,
-            }
-        )
-    return wrists
-
-
 def check_hand_near_objects(
     wrist_pos: Tuple[int, int],
     depth_mm: Optional[float],
@@ -807,8 +726,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         choices=["rgb_chw_float32", "bgr_hwc_uint8"],
         help="ACL YOLO 模型输入格式，最新 yolo26 OM 默认使用 rgb_chw_float32。",
     )
-    parser.add_argument("--pose-model", help="YOLO-pose OM 模型路径（可选）")
-    parser.add_argument("--disable-hand", action="store_true", help="关闭手部检测链路（不启用 pose，也不回退到 MediaPipe）")
+    parser.add_argument("--disable-hand", action="store_true", help="关闭手部检测（MediaPipe）")
     parser.add_argument(
         "--disable-distance",
         "--disable-distance-detection",
@@ -819,8 +737,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--data-yaml", required=True, help="数据配置 YAML")
     parser.add_argument("--danger-distance", type=int, default=300, help="危险距离 (mm)")
     parser.add_argument("--conf-thres", type=float, default=0.55, help="YOLO 置信度阈值")
-    parser.add_argument("--pose-conf-thres", type=float, default=0.5, help="Pose 置信度阈值")
-    parser.add_argument("--pose-infer-skip", type=int, default=1, help="Pose 跳帧间隔")
     parser.add_argument("--track-iou-thres", type=float, default=0.3, help="对象跟踪 IoU 阈值")
     parser.add_argument("--track-max-missing", type=int, default=6, help="对象丢失后保留帧数")
     parser.add_argument("--enable-laser", action="store_true", help="启用激光振镜标记")
@@ -835,7 +751,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--laser-size-threshold-ratio", type=float, default=0.12, help="框尺寸变化超过该比例时才重发激光框")
     parser.add_argument("--laser-force-refresh-interval", type=float, default=0.35, help="即使变化不大也强制重发的最大间隔（秒）")
     parser.add_argument("--laser-update-interval", type=float, default=0.0, help="激光更新最小间隔（秒）")
-    parser.add_argument("--max-laser-targets", type=int, default=1, help="激光同时标记的最大目标数")
+    parser.add_argument("--max-laser-targets", type=int, default=10, help="激光同时标记的最大目标数")
     parser.add_argument("--write-debug-assets", action="store_true", help="额外写出调试帧和透明叠加层")
     parser.add_argument("--camera-serial", default="", help="指定 RealSense 序列号；为空时自动选择第一个设备")
     return parser
@@ -844,12 +760,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_arg_parser().parse_args()
     yolo_backend = detect_yolo_backend(args.yolo_model)
-    needs_acl = yolo_backend == "acl" or args.pose_model is not None
+    needs_acl = yolo_backend == "acl"
 
     if needs_acl and acl is None:
         raise ModuleNotFoundError("未找到 acl 模块，请先安装 Ascend ACL Python 运行时。")
-    if not args.disable_hand and args.pose_model is None and mp is None:
-        raise ModuleNotFoundError("未找到 mediapipe 模块，请先安装 mediapipe，或改用 --pose-model。")
+    if not args.disable_hand and mp is None:
+        raise ModuleNotFoundError("未找到 mediapipe 模块，请先安装 mediapipe。")
 
     print("=" * 60)
     print("统一检测监控 - 物体 + 手部安全")
@@ -873,15 +789,9 @@ def main() -> None:
         yolo_model = UltralyticsYoloModel(args.yolo_model, device=args.yolo_device)
         yolo_model.load()
 
-    pose_model = None
     hands = None
     if args.disable_hand:
         print("\n手部检测: 已关闭")
-    elif args.pose_model:
-        pose_model = AclLiteModel(args.pose_model)
-        pose_model.load()
-        pose_model.context = res.context
-        print("✓ Pose 模型已初始化")
     else:
         print("\n初始化 MediaPipe Hands...")
         mp_hands = mp.solutions.hands
@@ -983,7 +893,7 @@ def main() -> None:
     last_laser_box: Optional[List[float]] = None
     last_laser_track_id: Optional[int] = None
 
-    executor = ThreadPoolExecutor(max_workers=2 if (pose_model is None and not args.disable_hand) else 1)
+    executor = ThreadPoolExecutor(max_workers=2 if not args.disable_hand else 1)
 
     def run_yolo_inference(frame: np.ndarray, h_orig: int, w_orig: int) -> Tuple[List[dict], float]:
         t0 = time.time()
@@ -1022,15 +932,6 @@ def main() -> None:
             result = None
         return result, (time.time() - t0) * 1000.0
 
-    def run_pose_detection(frame: np.ndarray, should_detect: bool):
-        t0 = time.time()
-        if not should_detect:
-            return None, (time.time() - t0) * 1000.0
-        img_pose = (dvpp_resizer.resize(frame) if dvpp_resizer else cv2.resize(frame, (640, 640))).astype(np.uint8)
-        outputs = pose_model.execute(img_pose)
-        persons = postprocess_pose(outputs or [], frame.shape, conf_thres=args.pose_conf_thres)
-        return persons, (time.time() - t0) * 1000.0
-
     try:
         while True:
             frames = pipeline.wait_for_frames()
@@ -1056,12 +957,6 @@ def main() -> None:
             if args.disable_hand:
                 hand_results = None
                 hand_ms = 0.0
-            elif pose_model is not None:
-                should_detect_pose = frame_count % (args.pose_infer_skip + 1) == 0
-                pose_results_new, hand_ms = run_pose_detection(frame, should_detect_pose)
-                if pose_results_new is not None:
-                    last_hand_results = pose_results_new
-                hand_results = last_hand_results if last_hand_results is not None else []
             else:
                 should_detect_hand = frame_count % 3 == 0
                 hand_future = executor.submit(run_mediapipe_detection, frame, should_detect_hand)
@@ -1075,42 +970,7 @@ def main() -> None:
             hand_count = 0
             danger_obj = None
 
-            if pose_model is not None:
-                hand_count = len(hand_results)
-                for person in hand_results:
-                    wrists = extract_pose_wrists(person, depth_frame, conf_thres=args.pose_conf_thres)
-                    for wrist in wrists:
-                        wx, wy = wrist["pixel"]
-                        depth_mm = wrist["depth_mm"]
-                        color = (0, 255, 0)
-                        if distance_detection_enabled:
-                            if depth_mm > 0 and (min_depth_mm is None or depth_mm < min_depth_mm):
-                                min_depth_mm = depth_mm
-                            if depth_mm > 0 and depth_mm < args.danger_distance:
-                                is_danger = True
-                                color = (0, 0, 255)
-                                near_obj, obj = check_hand_near_objects(
-                                    (wx, wy), depth_mm, objects, args.danger_distance
-                                )
-                                if near_obj:
-                                    danger_obj = obj
-                        cv2.circle(frame, (wx, wy), 8, color, -1)
-
-                if distance_detection_enabled and is_danger:
-                    if danger_obj:
-                        text = f"DANGER! Wrist near {danger_obj['name']}: {min_depth_mm:.0f}mm"
-                    else:
-                        text = f"DANGER! Wrist too close: {min_depth_mm:.0f}mm"
-                    cv2.putText(
-                        frame,
-                        text,
-                        (30, 40),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.9,
-                        (0, 0, 255),
-                        3,
-                    )
-            elif hand_results is not None and hand_results.multi_hand_landmarks:
+            if hand_results is not None and hasattr(hand_results, "multi_hand_landmarks") and hand_results.multi_hand_landmarks:
                 hand_count = len(hand_results.multi_hand_landmarks)
                 for hand_landmarks in hand_results.multi_hand_landmarks:
                     key_points = [0, 2, 4, 5, 8, 9, 12, 13, 16, 17, 20]
@@ -1202,14 +1062,22 @@ def main() -> None:
                         if needs_refresh:
                             galvo.task_index = 0
                             try:
-                                galvo.draw_box(
-                                    target_box,
-                                    pixel_coords=True,
-                                    task_index=0,
-                                    image_width=w_orig,
-                                    image_height=h_orig,
-                                    steps_per_edge=15,
-                                )
+                                if hasattr(galvo, "draw_box_sweep"):
+                                    galvo.draw_box_sweep(
+                                        target_box,
+                                        pixel_coords=True,
+                                        image_width=w_orig,
+                                        image_height=h_orig,
+                                        max_tasks=8,
+                                    )
+                                else:
+                                    galvo.draw_box(
+                                        target_box,
+                                        pixel_coords=True,
+                                        image_width=w_orig,
+                                        image_height=h_orig,
+                                        steps_per_edge=15,
+                                    )
                                 galvo.update_tasks()
                                 locked_track_ids = {target_track_id}
                                 laser_marked = True
