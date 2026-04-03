@@ -1,0 +1,16 @@
+# MindIE 运行参数示例（请按本机版本调整字段）
+
+model:
+  name: qwen3-1.7b
+  path: /home/HwHiAiUser/ICT/models/qwen3-1.7b
+
+server:
+  host: 0.0.0.0
+  port: 1025
+  endpoint: /v1/chat/completions
+
+runtime:
+  device_id: 0
+  max_batch_size: 1
+  max_input_tokens: 512
+  max_output_tokens: 256

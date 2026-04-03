@@ -1,0 +1,47 @@
+# 日志文件
+*.log
+nohup.out
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.class
+*.so
+
+# WebUI 临时文件
+webui_http/frame.jpg
+webui_http/state.json
+webui_http_safety/frame.jpg
+webui_http_safety/state.json
+
+# 大文件和数据集
+ElectroCom61*/
+samples_source/
+qwen25_fastllm/
+kernel_meta/
+check_result.json
+fusion_result.json
+rtsp_log.txt
+mediamtx_bin
+
+# 模型文件（通常很大）
+*.om
+*.onnx
+*.pt
+*.pth
+runs/
+
+# 构建产物
+build/
+dist/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 临时文件
+*.tmp
+*.bak

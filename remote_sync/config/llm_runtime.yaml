@@ -1,0 +1,23 @@
+# LLM 运行时统一配置（OrangePi AI Pro）
+
+backend: mindie
+
+acl:
+  model_path: /home/HwHiAiUser/ICT/qwen3_1_7b_fp16.om
+  tokenizer_path: /home/HwHiAiUser/ICT/models/qwen3-1.7b
+  device_id: 0
+  max_seq_len: 512
+
+mindie:
+  enabled: true
+  endpoint: http://127.0.0.1:1025/v1/chat/completions
+  model: Qwen3.5-0.8B-Q4_K_M.gguf
+  timeout_s: 120
+
+generation_defaults:
+  max_new_tokens: 128
+  temperature: 0.7
+  top_k: 40
+  top_p: 0.9
+  do_sample: true
+  repetition_penalty: 1.0

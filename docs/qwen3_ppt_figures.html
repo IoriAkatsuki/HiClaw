@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Qwen3 Ascend 310B1 部署 — PPT 插图</title>
+<style>
+  :root {
+    --bg: #f7f8fa;
+    --card: #ffffff;
+    --accent: #2563eb;
+    --success: #16a34a;
+    --fail: #dc2626;
+    --warn: #d97706;
+    --text: #1e293b;
+    --muted: #64748b;
+    --border: #e2e8f0;
+    --shadow: 0 2px 12px rgba(0,0,0,.07);
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family: "Microsoft YaHei","PingFang SC","Segoe UI",sans-serif; background:var(--bg); color:var(--text); line-height:1.6; }
+
+  /* ── nav tabs ── */
+  .tab-bar { position:sticky; top:0; z-index:10; background:#1e293b; display:flex; gap:2px; padding:6px 24px; }
+  .tab-bar button { background:transparent; color:#94a3b8; border:none; padding:10px 20px; font-size:15px; cursor:pointer; border-radius:6px 6px 0 0; transition:.2s; }
+  .tab-bar button.active, .tab-bar button:hover { background:#334155; color:#fff; }
+
+  /* ── pages ── */
+  .page { display:none; max-width:1100px; margin:0 auto; padding:36px 24px 60px; }
+  .page.active { display:block; }
+  .page h1 { font-size:28px; margin-bottom:6px; }
+  .page .subtitle { color:var(--muted); font-size:14px; margin-bottom:28px; }
+
+  /* ── pipeline flow ── */
+  .pipeline { display:flex; align-items:center; gap:0; justify-content:center; flex-wrap:wrap; margin:32px 0; }
+  .pipeline .step { background:var(--card); border:2px solid var(--border); border-radius:12px; padding:18px 22px; min-width:140px; text-align:center; box-shadow:var(--shadow); position:relative; }
+  .pipeline .step .label { font-size:13px; color:var(--muted); }
+  .pipeline .step .name { font-size:17px; font-weight:700; margin-top:4px; }
+  .pipeline .step .detail { font-size:12px; color:var(--muted); margin-top:4px; }
+  .pipeline .step.highlight { border-color:var(--accent); background:#eff6ff; }
+  .pipeline .arrow { font-size:28px; color:var(--accent); margin:0 6px; flex-shrink:0; }
+
+  /* ── metric cards ── */
+  .metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:16px; margin:28px 0; }
+  .metric-card { background:var(--card); border-radius:12px; padding:20px; box-shadow:var(--shadow); text-align:center; }
+  .metric-card .value { font-size:32px; font-weight:800; color:var(--accent); }
+  .metric-card .unit { font-size:14px; color:var(--muted); }
+  .metric-card .label { font-size:13px; color:var(--muted); margin-top:6px; }
+
+  /* ── comparison table ── */
+  table.compare { width:100%; border-collapse:collapse; margin:24px 0; background:var(--card); border-radius:12px; overflow:hidden; box-shadow:var(--shadow); }
+  table.compare th { background:#1e293b; color:#fff; padding:12px 16px; font-size:14px; text-align:left; }
+  table.compare td { padding:11px 16px; border-bottom:1px solid var(--border); font-size:14px; }
+  table.compare tr:last-child td { border-bottom:none; }
+  table.compare .ok { color:var(--success); font-weight:700; }
+  table.compare .fail { color:var(--fail); font-weight:700; }
+
+  /* ── operator cards ── */
+  .op-grid { display:grid; grid-template-columns:1fr 1fr; gap:18px; margin:24px 0; }
+  .op-card { background:var(--card); border-radius:12px; padding:20px 22px; box-shadow:var(--shadow); border-left:4px solid var(--fail); }
+  .op-card.patched { border-left-color:var(--warn); }
+  .op-card h3 { font-size:16px; margin-bottom:6px; }
+  .op-card .source { font-size:12px; color:var(--muted); margin-bottom:8px; }
+  .op-card pre { background:#f1f5f9; padding:10px 12px; border-radius:6px; font-size:12.5px; overflow-x:auto; line-height:1.5; }
+  .op-card .result { margin-top:10px; font-size:13px; padding:6px 10px; border-radius:6px; }
+  .op-card .result.fail-bg { background:#fef2f2; color:var(--fail); }
+  .op-card .result.warn-bg { background:#fffbeb; color:var(--warn); }
+
+  /* ── probe timeline ── */
+  .probe-timeline { margin:28px 0; }
+  .probe-step { display:flex; align-items:flex-start; gap:16px; margin-bottom:0; }
+  .probe-step .dot-col { display:flex; flex-direction:column; align-items:center; }
+  .probe-step .dot { width:18px; height:18px; border-radius:50%; background:var(--success); flex-shrink:0; }
+  .probe-step .dot.dead { background:var(--fail); }
+  .probe-step .line { width:3px; height:48px; background:var(--border); }
+  .probe-step .line.dead { background:var(--fail); opacity:.4; }
+  .probe-step .content { padding-bottom:20px; }
+  .probe-step .content h4 { font-size:14px; }
+  .probe-step .content p { font-size:13px; color:var(--muted); }
+
+  /* ── dynamic vs static diagram ── */
+  .vs-container { display:grid; grid-template-columns:1fr 60px 1fr; gap:0; margin:28px 0; align-items:start; }
+  .vs-box { background:var(--card); border-radius:14px; padding:24px; box-shadow:var(--shadow); }
+  .vs-box h3 { font-size:18px; margin-bottom:10px; display:flex; align-items:center; gap:8px; }
+  .vs-box h3 .icon { font-size:22px; }
+  .vs-box ul { padding-left:18px; font-size:14px; }
+  .vs-box ul li { margin-bottom:6px; }
+  .vs-box.good { border:2px solid var(--success); }
+  .vs-box.bad { border:2px solid var(--fail); }
+  .vs-divider { display:flex; align-items:center; justify-content:center; font-size:32px; font-weight:800; color:var(--muted); }
+  .vs-box .tag { display:inline-block; font-size:11px; padding:2px 8px; border-radius:4px; font-weight:600; }
+  .vs-box .tag.green { background:#dcfce7; color:#166534; }
+  .vs-box .tag.red { background:#fee2e2; color:#991b1b; }
+
+  .code-block { background:#0f172a; color:#e2e8f0; padding:16px 20px; border-radius:10px; font-family:"Cascadia Code","Fira Code",monospace; font-size:13px; line-height:1.7; overflow-x:auto; margin:16px 0; }
+  .code-block .comment { color:#64748b; }
+  .code-block .kw { color:#7dd3fc; }
+  .code-block .str { color:#86efac; }
+  .code-block .hl { color:#fbbf24; }
+
+  .callout { background:#eff6ff; border-left:4px solid var(--accent); padding:14px 18px; border-radius:0 8px 8px 0; margin:20px 0; font-size:14px; }
+  .callout.red { background:#fef2f2; border-left-color:var(--fail); }
+  .callout.green { background:#f0fdf4; border-left-color:var(--success); }
+
+  .section-title { font-size:20px; font-weight:700; margin:32px 0 12px; padding-bottom:8px; border-bottom:2px solid var(--border); }
+
+  .badge { display:inline-block; padding:3px 10px; border-radius:20px; font-size:12px; font-weight:600; }
+  .badge.success { background:#dcfce7; color:#166534; }
+  .badge.danger { background:#fee2e2; color:#991b1b; }
+
+  /* ── patch flow ── */
+  .patch-flow { background:var(--card); border-radius:14px; padding:24px; box-shadow:var(--shadow); margin:24px 0; }
+  .patch-row { display:flex; align-items:center; gap:12px; padding:10px 0; border-bottom:1px dashed var(--border); font-size:14px; }
+  .patch-row:last-child { border-bottom:none; }
+  .patch-row .from { background:#fee2e2; padding:4px 12px; border-radius:6px; font-family:monospace; font-weight:600; min-width:140px; text-align:center; }
+  .patch-row .to { background:#fef9c3; padding:4px 12px; border-radius:6px; font-family:monospace; font-weight:600; min-width:220px; text-align:center; }
+  .patch-row .arrow-sm { color:var(--warn); font-weight:700; font-size:18px; }
+  .patch-row .note { color:var(--muted); font-size:13px; }
+
+  .conclusion-box { background:linear-gradient(135deg,#1e293b,#334155); color:#fff; border-radius:14px; padding:28px; margin:28px 0; }
+  .conclusion-box h3 { font-size:20px; margin-bottom:12px; }
+  .conclusion-box p { font-size:15px; line-height:1.8; opacity:.92; }
+</style>
+</head>
+<body>
+
+<div class="tab-bar">
+  <button class="active" onclick="show('p1',this)">1 - 全链路 Pipeline</button>
+  <button onclick="show('p2',this)">2 - 性能指标</button>
+  <button onclick="show('p3',this)">3 - 算子拆分尝试</button>
+  <button onclick="show('p4',this)">4 - 逐层定位过程</button>
+  <button onclick="show('p5',this)">5 - 动态图 vs 静态图</button>
+  <button onclick="show('p6',this)">6 - 对比与结论</button>
+</div>
+
+<!-- ════════ Page 1: Pipeline ════════ -->
+<div id="p1" class="page active">
+  <h1>Qwen3-0.6B 全链路 NPU 部署</h1>
+  <div class="subtitle">Orange Pi AI Pro · Ascend 310B1 · CANN 8.5.0 · FP16</div>
+
+  <div class="pipeline">
+    <div class="step">
+      <div class="label">Step 1</div>
+      <div class="name">PyTorch</div>
+      <div class="detail">safetensors 权重<br>0.6B params</div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="step">
+      <div class="label">Step 2</div>
+      <div class="name">ONNX</div>
+      <div class="detail">opset 17<br>29 ops · 4106 nodes</div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="step highlight">
+      <div class="label">Step 3</div>
+      <div class="name">ATC 编译</div>
+      <div class="detail">x86 交叉编译<br>→ Ascend310B1</div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="step">
+      <div class="label">Step 4</div>
+      <div class="name">.om 模型</div>
+      <div class="detail">离线模型 1.5 GB<br>FP16 精度</div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="step" style="border-color:var(--success);">
+      <div class="label">Step 5</div>
+      <div class="name">ACL 推理</div>
+      <div class="detail">NPU Da Vinci 核<br>65.3 tok/s</div>
+    </div>
+  </div>
+
+  <div class="callout green">
+    <strong>部署成功：</strong>Qwen3-0.6B 使用标准 GQA Transformer 架构（28 层），所有算子均被 ATC/TBE 编译器支持，全链路无需任何算子替换。Top-5 token 排序与 PyTorch CPU 完全一致，max delta &lt; 0.01。
+  </div>
+
+  <div class="section-title">模型架构</div>
+  <table class="compare">
+    <tr><th>参数</th><th>值</th></tr>
+    <tr><td>模型</td><td>Qwen/Qwen3-0.6B</td></tr>
+    <tr><td>参数量</td><td>0.6B</td></tr>
+    <tr><td>架构</td><td>标准 GQA Transformer (28 layers)</td></tr>
+    <tr><td>Hidden size</td><td>1024</td></tr>
+    <tr><td>注意力头</td><td>16 Q / 8 KV (Grouped Query Attention)</td></tr>
+    <tr><td>词表大小</td><td>151,936</td></tr>
+    <tr><td>推理精度</td><td>FP16 (allow_fp32_to_fp16)</td></tr>
+  </table>
+</div>
+
+<!-- ════════ Page 2: Metrics ════════ -->
+<div id="p2" class="page">
+  <h1>性能基准测试</h1>
+  <div class="subtitle">WikiText-2 评估 · 序列长度 512 · 步长 256</div>
+
+  <div class="metrics">
+    <div class="metric-card">
+      <div class="value">22.44</div>
+      <div class="unit">PPL</div>
+      <div class="label">WikiText-2 困惑度</div>
+    </div>
+    <div class="metric-card">
+      <div class="value">65.3</div>
+      <div class="unit">tok/s</div>
+      <div class="label">Prefill 吞吐量</div>
+    </div>
+    <div class="metric-card">
+      <div class="value">299,077</div>
+      <div class="unit">tokens</div>
+      <div class="label">评估 token 总数</div>
+    </div>
+    <div class="metric-card">
+      <div class="value">76.3</div>
+      <div class="unit">min</div>
+      <div class="label">总评估时间</div>
+    </div>
+    <div class="metric-card">
+      <div class="value">1,168</div>
+      <div class="unit">chunks</div>
+      <div class="label">滑窗分块数</div>
+    </div>
+    <div class="metric-card">
+      <div class="value">&lt; 0.01</div>
+      <div class="unit">delta</div>
+      <div class="label">CPU/NPU max 精度偏差</div>
+    </div>
+  </div>
+
+  <div class="section-title">NPU vs CPU 对比</div>
+  <table class="compare">
+    <tr><th>模式</th><th>量化</th><th>Prefill</th><th>Decode</th><th>KV Cache</th><th>可用性</th></tr>
+    <tr>
+      <td>NPU .om (prefill-only)</td><td>FP16</td>
+      <td class="ok">65.3 tok/s</td>
+      <td class="fail">0.3 tok/s *</td>
+      <td class="fail">不支持</td>
+      <td>仅 Prefill</td>
+    </tr>
+    <tr>
+      <td>CPU llama.cpp (3线程)</td><td>Q4_K_M</td>
+      <td>24.4 tok/s</td>
+      <td class="ok">7.4 tok/s</td>
+      <td class="ok">原生支持</td>
+      <td class="ok">可对话</td>
+    </tr>
+  </table>
+  <div class="callout">
+    * NPU decode 仅 0.3 tok/s，因每步需重跑完整 512 token prefill（无 KV cache）。310B1 ATC 不支持 KV cache 中间维度动态形状（<code>Multi-batch not support middle dynamic shape</code>）。
+  </div>
+
+  <div class="section-title">正确性验证 — Prompt "1+1="</div>
+  <table class="compare">
+    <tr><th>Rank</th><th>Token</th><th>PyTorch CPU</th><th>NPU .om</th><th>Delta</th></tr>
+    <tr><td>1</td><td><code>'2'</code></td><td>17.578</td><td>17.578</td><td class="ok">0.000</td></tr>
+    <tr><td>2</td><td><code>'1'</code></td><td>15.406</td><td>15.398</td><td>0.008</td></tr>
+    <tr><td>3</td><td><code>'?\n\n'</code></td><td>14.258</td><td>14.258</td><td class="ok">0.000</td></tr>
+    <tr><td>4</td><td><code>'?\n'</code></td><td>14.055</td><td>14.055</td><td class="ok">0.000</td></tr>
+    <tr><td>5</td><td><code>'3'</code></td><td>13.594</td><td>13.594</td><td class="ok">0.000</td></tr>
+  </table>
+</div>
+
+<!-- ════════ Page 3: Operator Patches ════════ -->
+<div id="p3" class="page">
+  <h1>Qwen3.5 算子拆分与替代尝试</h1>
+  <div class="subtitle">patch_qwen35_linear_attn_mul.py · ONNX 图级改写 · 最终仍失败</div>
+
+  <div class="op-grid">
+    <div class="op-card">
+      <h3>triangular_update <span class="badge danger">核心死锁</span></h3>
+      <div class="source">来源：chunk_gated_delta_rule 内部</div>
+      <pre><span style="color:#7dd3fc">for</span> index <span style="color:#7dd3fc">in</span> range(1, attn.shape[-1]):
+    row = attn[..., index, :index].clone()
+    sub = attn[..., :index, :index].clone()
+    attn[..., index, :index] = row + \
+        (row.unsqueeze(-1) * sub).sum(-2)</pre>
+      <div class="result fail-bg">NPU synchronize() 60s 死锁 — 动态循环边界无法静态化</div>
+    </div>
+
+    <div class="op-card patched">
+      <h3>5D Mul <span class="badge danger">TBE 不支持</span></h3>
+      <div class="source">来源：linear_attn 子图 · /model/layers.0/linear_attn/Mul</div>
+      <pre>ATC ERROR:
+Operator [Mul] in node
+  [/model/layers.0/linear_attn/Mul]
+  is not supported</pre>
+      <div class="result warn-bg">尝试 Reshape(5D→4D) + Mul + Reshape — 单算子可绕过，整体仍失败</div>
+    </div>
+
+    <div class="op-card patched">
+      <h3>INT64 Mul <span class="badge danger">TBE 不支持</span></h3>
+      <div class="source">来源：形状计算子图</div>
+      <pre>INT64 × INT64 → TBE 编译失败
+替代：Cast(→INT32) + Mul + Cast(→INT64)</pre>
+      <div class="result warn-bg">单独可绕过，但无法解决核心 triangular_update 问题</div>
+    </div>
+
+    <div class="op-card patched">
+      <h3>Scalar Mul / Add 广播 <span class="badge danger">TBE 不支持</span></h3>
+      <div class="source">来源：linear_attn 缩放与偏置</div>
+      <pre>Scalar × Tensor → Expand + Mul
+Add(...,1) broadcast → Tile + Add</pre>
+      <div class="result warn-bg">绕过隐式广播限制，但底层算子仍阻塞</div>
+    </div>
+  </div>
+
+  <div class="section-title">算子替代流程图</div>
+  <div class="patch-flow">
+    <div class="patch-row">
+      <span class="from">5D Mul</span>
+      <span class="arrow-sm">→</span>
+      <span class="to">Reshape(5D→4D) + Mul(4D) + Reshape</span>
+      <span class="note">TBE 不支持 5D 浮点乘法</span>
+    </div>
+    <div class="patch-row">
+      <span class="from">INT64 Mul</span>
+      <span class="arrow-sm">→</span>
+      <span class="to">Cast(→INT32) + Mul + Cast(→INT64)</span>
+      <span class="note">TBE 不支持 INT64 乘法</span>
+    </div>
+    <div class="patch-row">
+      <span class="from">Scalar × Tensor</span>
+      <span class="arrow-sm">→</span>
+      <span class="to">Expand(scalar→shape) + Mul</span>
+      <span class="note">TBE 不支持标量隐式广播</span>
+    </div>
+    <div class="patch-row">
+      <span class="from">Add (...,1) 广播</span>
+      <span class="arrow-sm">→</span>
+      <span class="to">Tile(dim→match) + Add</span>
+      <span class="note">TBE 不支持尾维广播</span>
+    </div>
+    <div class="patch-row">
+      <span class="from">Identity Expand</span>
+      <span class="arrow-sm">→</span>
+      <span class="to">直接删除节点，重连输入输出</span>
+      <span class="note">输入输出 shape 相同时为空操作</span>
+    </div>
+  </div>
+
+  <div class="callout red">
+    <strong>最终结论：</strong>即使在 ONNX 图层面逐一替代了不兼容算子，<code>chunk_gated_delta_rule</code> 展开后的 <code>triangular_update</code> 动态循环仍无法被 ATC 静态图编译器处理。Qwen3.5 hybrid Mamba 架构在 310B1 上<strong>不可部署</strong>。
+  </div>
+</div>
+
+<!-- ════════ Page 4: Probe Timeline ════════ -->
+<div id="p4" class="page">
+  <h1>逐层二分定位过程</h1>
+  <div class="subtitle">probe_layer0_submodule.py · 4 种实验模式 · 精确定位到 triangular_update</div>
+
+  <div class="section-title">定位链路</div>
+  <div class="probe-timeline">
+    <div class="probe-step">
+      <div class="dot-col"><div class="dot"></div><div class="line"></div></div>
+      <div class="content">
+        <h4>model.forward()</h4>
+        <p>进入 generate()，首次前向 180s 超时无退出</p>
+      </div>
+    </div>
+    <div class="probe-step">
+      <div class="dot-col"><div class="dot"></div><div class="line"></div></div>
+      <div class="content">
+        <h4>embed_tokens</h4>
+        <p>Embedding 层正常通过（hook 确认输出）</p>
+      </div>
+    </div>
+    <div class="probe-step">
+      <div class="dot-col"><div class="dot"></div><div class="line"></div></div>
+      <div class="content">
+        <h4>layers.0 (Layer 0)</h4>
+        <p>进入第一个 decoder layer，manual 模式确认 layer0.forward 挂起</p>
+      </div>
+    </div>
+    <div class="probe-step">
+      <div class="dot-col"><div class="dot"></div><div class="line dead"></div></div>
+      <div class="content">
+        <h4>layers.0.linear_attn <span class="badge danger">Hang</span></h4>
+        <p>Hook 打印到 linear_attn 入口后无输出。bypass 替换为 Identity 后 forward 成功</p>
+      </div>
+    </div>
+    <div class="probe-step">
+      <div class="dot-col"><div class="dot dead"></div><div class="line dead"></div></div>
+      <div class="content">
+        <h4>chunk_gated_delta_rule</h4>
+        <p>delta_steps 模式逐步跟踪，卡在内部 triangular_update 阶段</p>
+      </div>
+    </div>
+    <div class="probe-step">
+      <div class="dot-col"><div class="dot dead"></div></div>
+      <div class="content">
+        <h4>triangular_update <span class="badge danger">Dead Lock</span></h4>
+        <p>最小复现：shape (1,1,1,64,64)，NPU synchronize() 60s 永不返回</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="section-title">4 种实验模式结果</div>
+  <table class="compare">
+    <tr><th>模式</th><th>操作</th><th>发现</th></tr>
+    <tr>
+      <td><code>hooks</code></td>
+      <td>Layer0 各子模块注册 forward pre-hook</td>
+      <td>打印到 <code>linear_attn</code> 入口后 → <span class="fail">无输出</span></td>
+    </tr>
+    <tr>
+      <td><code>manual</code></td>
+      <td>单独执行 embed_tokens + layer0.forward</td>
+      <td><span class="fail">layer0.forward 挂起</span></td>
+    </tr>
+    <tr>
+      <td><code>delta_steps</code></td>
+      <td>逐步跟踪 chunk_gated_delta_rule 内部</td>
+      <td>卡在 <span class="fail">triangular_update</span> 阶段</td>
+    </tr>
+    <tr>
+      <td><code>bypass</code></td>
+      <td>将 linear_attn 替换为 Identity</td>
+      <td><span class="ok">forward 成功</span>（输出无意义，仅验证定位）</td>
+    </tr>
+  </table>
+
+  <div class="callout">
+    <strong>诊断辅助证据：</strong>NPU <code>npu-smi</code> 显示挂起期间 AICore=0%，表明 Da Vinci 核未执行任何 kernel；推断 hang 发生在 AICPU（Host 侧 CPU 算子）或 NPU 调度层。日志中出现 <code>"The oprator of add is executed, Currently High Accuracy but Low Performance OP with 64-bit"</code>，说明部分算子已 fallback 到 64-bit Host 侧执行路径。
+  </div>
+</div>
+
+<!-- ════════ Page 5: Dynamic vs Static ════════ -->
+<div id="p5" class="page">
+  <h1>动态图 vs 静态图</h1>
+  <div class="subtitle">为什么 SSM 算子无法在 Ascend 310B1 NPU 上运行</div>
+
+  <div class="vs-container">
+    <div class="vs-box good">
+      <h3><span class="icon">&#9889;</span> 动态图 (Eager Mode)</h3>
+      <ul>
+        <li><strong>执行方式：</strong>逐行解释 Python 代码，每条算子<strong>即刻发射</strong>到硬件</li>
+        <li><strong>控制流：</strong>支持任意 Python if / for / while</li>
+        <li><strong>循环边界：</strong>可依赖<strong>运行时张量值</strong></li>
+        <li><strong>优化程度：</strong>无全局优化，逐算子执行</li>
+        <li><strong>代表框架：</strong>PyTorch (默认), TensorFlow Eager</li>
+      </ul>
+      <div style="margin-top:14px;">
+        <span class="tag green">灵活</span>
+        <span class="tag red">无法整体优化</span>
+      </div>
+    </div>
+
+    <div class="vs-divider">VS</div>
+
+    <div class="vs-box bad">
+      <h3><span class="icon">&#9881;</span> 静态图 (Graph Mode)</h3>
+      <ul>
+        <li><strong>执行方式：</strong>编译器<strong>一次性编译</strong>整个计算图为固定执行计划</li>
+        <li><strong>控制流：</strong>所有分支和循环必须<strong>编译期确定</strong></li>
+        <li><strong>张量形状：</strong>必须<strong>编译期已知</strong>或声明为有限动态维度</li>
+        <li><strong>优化程度：</strong>算子融合、内存复用、流水调度</li>
+        <li><strong>代表框架：</strong>ATC/TBE, TensorRT, XLA</li>
+      </ul>
+      <div style="margin-top:14px;">
+        <span class="tag green">高效推理</span>
+        <span class="tag red">不支持动态控制流</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="section-title">冲突核心：数据依赖的动态控制流</div>
+
+  <div class="code-block">
+<span class="comment"># Qwen3.5 的 triangular_update — 循环边界依赖张量维度</span>
+<span class="kw">for</span> index <span class="kw">in</span> range(1, attn.shape[-1]):  <span class="comment"># ← 动态边界</span>
+    row = attn[..., index, <span class="hl">:index</span>].clone() <span class="comment"># ← 每次切片范围不同</span>
+    sub = attn[..., <span class="hl">:index</span>, <span class="hl">:index</span>].clone()
+    attn[..., index, <span class="hl">:index</span>] = row + (row.unsqueeze(-1) * sub).sum(-2)
+  </div>
+
+  <div style="display:grid; grid-template-columns:1fr 1fr; gap:18px; margin:24px 0;">
+    <div class="callout red" style="margin:0;">
+      <strong>ATC 路径失败：</strong><br>
+      TBE 编译器要求所有 shape 编译期已知。遇到 linear_attn 的 5D Mul 和动态切片 → <code>Operator not supported</code>
+    </div>
+    <div class="callout red" style="margin:0;">
+      <strong>torch_npu 路径失败：</strong><br>
+      虽名义上支持 eager，但底层仍将算子分发到 NPU 图引擎。动态循环产生的大量小 kernel 在异步队列中形成<strong>数据依赖死锁</strong>
+    </div>
+  </div>
+
+  <div class="section-title">为什么 Qwen3-0.6B 能成功？</div>
+  <div class="callout green">
+    <strong>标准 GQA Transformer：</strong>所有算子（MatMul、Softmax、RMSNorm、SiLU 等）shape 固定、无动态循环，完美适配静态图编译。28 层结构规整，ATC 一次性编译为 .om 离线模型，NPU Da Vinci 核高效流水执行。
+  </div>
+
+  <div class="conclusion-box">
+    <h3>结论</h3>
+    <p>Ascend 310B1 的静态图架构是其高效 AI 推理的基础，但也意味着含 SSM/Mamba 动态循环的混合架构<strong>当前无法直接部署</strong>。团队经过系统化排查验证了这一兼容性边界，最终选择标准 Transformer 架构（Qwen3-0.6B）绕过限制，成功在边缘 NPU 上运行 LLM。</p>
+    <p style="margin-top:12px; opacity:.7;">这一底层探索虽然以失败告终，但精确定位了不兼容算子（triangular_update、chunk_gated_delta_rule），为后续 CANN 版本升级或模型适配提供了明确的方向。</p>
+  </div>
+</div>
+
+<!-- ════════ Page 6: Comparison & Conclusion ════════ -->
+<div id="p6" class="page">
+  <h1>架构对比与最终结论</h1>
+  <div class="subtitle">Qwen3-0.6B (标准 Transformer) vs Qwen3.5-0.8B (混合 Mamba)</div>
+
+  <table class="compare">
+    <tr><th>维度</th><th>Qwen3-0.6B <span class="badge success">成功</span></th><th>Qwen3.5-0.8B <span class="badge danger">失败</span></th></tr>
+    <tr><td>架构</td><td>GQA Transformer (28层)</td><td>Hybrid Mamba-Attention</td></tr>
+    <tr><td>关键算子</td><td>MatMul, Softmax, RMSNorm</td><td>chunk_gated_delta_rule, triangular_update, causal_conv1d</td></tr>
+    <tr><td>控制流</td><td class="ok">纯静态（shape 编译期确定）</td><td class="fail">动态循环（for i in range(attn.shape[-1])）</td></tr>
+    <tr><td>ATC 编译</td><td class="ok">成功 (.om 1.5GB)</td><td class="fail">失败 (TBE Mul not supported)</td></tr>
+    <tr><td>torch_npu</td><td>不适用（走 ACL 路径）</td><td class="fail">死锁 (180s 超时)</td></tr>
+    <tr><td>NPU 推理</td><td class="ok">65.3 tok/s, PPL=22.44</td><td class="fail">不可运行</td></tr>
+    <tr><td>部署结论</td><td class="ok">可行 ✓</td><td class="fail">不兼容 ✗</td></tr>
+  </table>
+
+  <div class="section-title">所有尝试路径汇总</div>
+  <table class="compare">
+    <tr><th>路径</th><th>结果</th><th>失败原因</th></tr>
+    <tr><td>Qwen3.5 + torch_npu 直推</td><td class="fail">失败</td><td>linear_attn → triangular_update NPU 死锁</td></tr>
+    <tr><td>Qwen3.5 + ONNX + ATC</td><td class="fail">失败</td><td>TBE 编译器不支持 linear_attn 中的 Mul 算子</td></tr>
+    <tr><td>Qwen3.5 + ONNX patch + ATC</td><td class="fail">失败</td><td>逐一替代后 triangular_update 动态循环仍无法编译</td></tr>
+    <tr><td>Qwen3.5 + CPU llama.cpp</td><td style="color:var(--warn)">可运行</td><td>10-30s/次，不满足 &lt;2s 实时要求</td></tr>
+    <tr><td>Qwen3-0.6B + ONNX + ATC + ACL</td><td class="ok">成功</td><td>—</td></tr>
+    <tr><td>llama.cpp ggml-cann (NPU)</td><td class="fail">失败</td><td>MatMul MatchOpModel fail</td></tr>
+    <tr><td>onnx-community 预导出</td><td class="fail">失败</td><td>com.microsoft contrib ops 不兼容</td></tr>
+  </table>
+
+  <div class="conclusion-box">
+    <h3>项目价值</h3>
+    <p><strong>成功验证：</strong>Qwen3-0.6B 通过 PyTorch → ONNX → ATC → .om → ACL 全链路部署于 Ascend 310B1 NPU，PPL=22.44，65.3 tok/s，证明了边缘 NPU 运行 LLM 的可行性。</p>
+    <p style="margin-top:10px;"><strong>底层探索：</strong>经系统化调研证明 Qwen3.5 混合 Mamba 架构因 SSM 算子（triangular_update 动态循环、chunk_gated_delta_rule）与 310B1 静态图不兼容。团队尝试了 5 种算子级 ONNX 图改写均无法绕过核心限制。</p>
+    <p style="margin-top:10px;"><strong>技术决策：</strong>基于以上发现，团队选择标准 GQA Transformer 绕过限制，这一决策有充分的工程验证支撑。</p>
+  </div>
+</div>
+
+<script>
+function show(id, btn) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab-bar button').forEach(b => b.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  btn.classList.add('active');
+}
+</script>
+</body>
+</html>

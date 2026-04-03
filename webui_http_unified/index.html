@@ -1,0 +1,1945 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Laser-AR Dashboard | Unified Monitor</title>
+    <style>
+        :root {
+            --bg-dark: #0a0b10;
+            --panel-bg: rgba(20, 22, 30, 0.88);
+            --accent-primary: #00f2ff;
+            --accent-secondary: #6f7cff;
+            --text-main: #e0e6ed;
+            --text-dim: #94a3b8;
+            --danger: #ff0055;
+            --safe: #00ffaa;
+            --warning: #ffb703;
+            --border: rgba(255, 255, 255, 0.1);
+            --header-height: 60px;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+            background:
+                radial-gradient(circle at top, rgba(0, 242, 255, 0.08), transparent 40%),
+                linear-gradient(180deg, #06070b, #0b0d13 65%, #090c12);
+            color: var(--text-main);
+            height: 100vh;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        header {
+            height: var(--header-height);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 24px;
+            border-bottom: 1px solid var(--border);
+            background: rgba(0, 0, 0, 0.42);
+            backdrop-filter: blur(10px);
+            overflow: hidden;
+            gap: 12px;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: 1.1rem;
+            font-weight: 800;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            color: var(--accent-primary);
+            white-space: nowrap;
+            flex-shrink: 0;
+        }
+
+        .system-status {
+            display: flex;
+            gap: 16px;
+            font-size: 0.82rem;
+            color: var(--text-dim);
+            flex-shrink: 1;
+            min-width: 0;
+            overflow: hidden;
+        }
+
+        .status-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #424b57;
+        }
+
+        .status-dot.active {
+            background: var(--safe);
+            box-shadow: 0 0 10px var(--safe);
+        }
+
+        main {
+            flex: 1;
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) 460px;
+            grid-template-rows: 1fr auto;
+            gap: 1px;
+            background: var(--border);
+            overflow: hidden;
+        }
+
+        .chat-dock {
+            grid-column: 1 / -1;
+            background: var(--panel-bg);
+            display: flex;
+            flex-direction: column;
+            max-height: 260px;
+            min-height: 120px;
+            padding: 10px 16px;
+            border-top: 1px solid var(--accent-primary);
+            overflow: hidden;
+            resize: vertical;
+        }
+        .chat-dock .chat-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 8px;
+            flex-shrink: 0;
+        }
+        .chat-dock .chat-header h3 {
+            font-size: 0.85rem;
+            font-weight: 700;
+            color: var(--accent-primary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .chat-dock select {
+            background: rgba(0,0,0,0.4);
+            color: var(--text-main);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 3px 8px;
+            font-size: 0.75rem;
+        }
+        .chat-dock .chat-status { font-size: 0.7rem; color: var(--text-dim); }
+        .chat-dock .chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 6px;
+            background: rgba(0,0,0,0.25);
+            border-radius: 6px;
+            margin-bottom: 8px;
+        }
+        .chat-dock .chat-msg {
+            margin-bottom: 8px;
+            padding: 6px 10px;
+            border-radius: 8px;
+            max-width: 80%;
+            line-height: 1.4;
+            font-size: 0.85rem;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+        }
+        .chat-dock .chat-msg.user {
+            background: rgba(0,120,255,0.2);
+            border: 1px solid rgba(0,120,255,0.3);
+            margin-left: auto;
+            text-align: right;
+        }
+        .chat-dock .chat-msg.bot {
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.08);
+        }
+        .chat-dock .chat-msg .role { font-size: 0.65rem; color: #666; }
+        .chat-dock .chat-msg .meta { font-size: 0.6rem; color: #555; margin-top: 3px; }
+        .chat-dock .chat-input-row {
+            display: flex;
+            gap: 6px;
+            flex-shrink: 0;
+        }
+        .chat-dock .chat-input-row input {
+            flex: 1;
+            padding: 8px 12px;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+            background: rgba(0,0,0,0.35);
+            color: var(--text-main);
+            font-size: 0.85rem;
+            outline: none;
+        }
+        .chat-dock .chat-input-row input:focus { border-color: var(--accent-primary); }
+        .chat-dock .chat-input-row button {
+            padding: 8px 16px;
+            border-radius: 6px;
+            border: none;
+            font-weight: 600;
+            font-size: 0.8rem;
+            cursor: pointer;
+        }
+        .chat-dock .btn-send {
+            background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+            color: #000;
+        }
+        .chat-dock .btn-send:disabled { opacity: 0.4; cursor: wait; }
+        .chat-dock .btn-reset {
+            background: rgba(255,255,255,0.06);
+            color: var(--text-dim);
+            border: 1px solid var(--border);
+        }
+
+        .viewport-container {
+            position: relative;
+            background: #000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+        }
+
+        #live-frame, #live-video {
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+            cursor: crosshair;
+        }
+
+        .crosshair-info {
+            position: absolute;
+            display: none;
+            pointer-events: none;
+            z-index: 30;
+            background: rgba(0, 0, 0, 0.85);
+            border: 1px solid var(--accent-primary);
+            color: var(--accent-primary);
+            padding: 8px 10px;
+            border-radius: 6px;
+            font-family: "Courier New", monospace;
+            font-size: 0.75rem;
+            line-height: 1.4;
+            max-width: 260px;
+            white-space: nowrap;
+        }
+
+        .viewport-banner {
+            position: absolute;
+            left: 16px;
+            bottom: 16px;
+            padding: 10px 14px;
+            border-radius: 6px;
+            background: rgba(0, 0, 0, 0.72);
+            border: 1px solid var(--border);
+            font-size: 0.78rem;
+            color: var(--text-dim);
+            max-width: 60%;
+            overflow-wrap: break-word;
+            word-break: break-word;
+        }
+
+        .viewport-banner strong {
+            color: var(--accent-primary);
+        }
+
+        .stream-disabled {
+            position: absolute;
+            inset: 50% auto auto 50%;
+            transform: translate(-50%, -50%);
+            padding: 14px 18px;
+            border-radius: 10px;
+            background: rgba(0, 0, 0, 0.78);
+            border: 1px solid rgba(0, 242, 255, 0.25);
+            color: var(--text-main);
+            text-align: center;
+            font-size: 0.85rem;
+            line-height: 1.55;
+            max-width: min(88%, 340px);
+            display: none;
+            z-index: 12;
+        }
+
+        .sidebar {
+            background: #0b0d13;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .tabs-header {
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            border-bottom: 1px solid var(--border);
+            background: rgba(255, 255, 255, 0.02);
+        }
+
+        .tab-btn {
+            border: none;
+            background: transparent;
+            color: var(--text-dim);
+            padding: 14px 6px;
+            font-size: 0.76rem;
+            font-weight: 700;
+            cursor: pointer;
+            position: relative;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .tab-btn.active {
+            color: var(--accent-primary);
+            background: rgba(0, 242, 255, 0.06);
+        }
+
+        .tab-btn.active::after {
+            content: "";
+            position: absolute;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            height: 2px;
+            background: var(--accent-primary);
+        }
+
+        .tab-content {
+            display: none;
+            flex: 1;
+            overflow-y: auto;
+            overflow-x: hidden;
+            padding: 18px;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        .card {
+            background: var(--panel-bg);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 16px;
+            margin-bottom: 14px;
+            overflow: hidden;
+        }
+
+        .card-title {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+            font-size: 0.74rem;
+            font-weight: 700;
+            color: var(--text-dim);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            min-width: 0;
+            gap: 8px;
+        }
+
+        .helper {
+            font-size: 0.74rem;
+            color: var(--text-dim);
+            line-height: 1.5;
+            overflow-wrap: break-word;
+            word-break: break-word;
+        }
+
+        .stat-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 10px;
+        }
+
+        .stat-box {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            border-radius: 8px;
+            padding: 10px;
+            min-width: 0;
+            overflow: hidden;
+        }
+
+        .stat-label {
+            display: block;
+            margin-bottom: 4px;
+            color: var(--text-dim);
+            font-size: 0.68rem;
+        }
+
+        .stat-val {
+            font-family: "Courier New", monospace;
+            font-size: 1rem;
+            font-weight: 700;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            min-width: 0;
+        }
+
+        .safety-banner {
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 14px;
+            text-align: center;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            font-weight: 800;
+        }
+
+        .safety-safe {
+            background: rgba(0, 255, 170, 0.12);
+            color: var(--safe);
+            border: 1px solid rgba(0, 255, 170, 0.35);
+        }
+
+        .safety-danger {
+            background: rgba(255, 0, 85, 0.18);
+            color: var(--danger);
+            border: 1px solid rgba(255, 0, 85, 0.45);
+        }
+
+        .obj-list {
+            list-style: none;
+        }
+
+        .obj-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px;
+            border-radius: 8px;
+            border: 1px solid transparent;
+            cursor: pointer;
+            transition: background 0.15s ease, border-color 0.15s ease;
+        }
+
+        .obj-item + .obj-item {
+            margin-top: 8px;
+        }
+
+        .obj-item:hover {
+            background: rgba(255, 255, 255, 0.03);
+        }
+
+        .obj-item.active {
+            border-color: rgba(0, 242, 255, 0.45);
+            background: rgba(0, 242, 255, 0.08);
+        }
+
+        .obj-id {
+            min-width: 34px;
+            color: var(--accent-primary);
+            font-family: "Courier New", monospace;
+            font-weight: 700;
+        }
+
+        .obj-meta {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .obj-name {
+            font-size: 0.88rem;
+            font-weight: 700;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .obj-extra {
+            margin-top: 2px;
+            color: var(--text-dim);
+            font-size: 0.72rem;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .obj-score {
+            padding: 2px 6px;
+            border-radius: 999px;
+            background: rgba(0, 242, 255, 0.12);
+            color: var(--accent-primary);
+            font-family: "Courier New", monospace;
+            font-size: 0.72rem;
+        }
+
+        .pill-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+
+        .marker-btn,
+        .choice-btn {
+            border: 1px solid var(--border);
+            background: rgba(255, 255, 255, 0.03);
+            color: var(--text-main);
+            padding: 8px 12px;
+            border-radius: 999px;
+            cursor: pointer;
+            font-size: 0.76rem;
+        }
+
+        .marker-btn.active,
+        .choice-btn.active {
+            border-color: rgba(0, 242, 255, 0.45);
+            background: rgba(0, 242, 255, 0.12);
+            color: var(--accent-primary);
+        }
+
+        .mono {
+            font-family: "Courier New", monospace;
+        }
+
+        .matrix-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 6px;
+        }
+
+        .matrix-cell {
+            border-radius: 6px;
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            background: rgba(0, 0, 0, 0.38);
+            padding: 8px;
+            text-align: center;
+            font-family: "Courier New", monospace;
+            font-size: 0.72rem;
+        }
+
+        .form-grid {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+            gap: 12px;
+        }
+
+        .form-field {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .form-field.full {
+            grid-column: 1 / -1;
+        }
+
+        .form-field label {
+            color: var(--text-dim);
+            font-size: 0.72rem;
+        }
+
+        .form-field input,
+        .form-field select,
+        .form-field textarea {
+            width: 100%;
+            padding: 9px 10px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 8px;
+            background: rgba(0, 0, 0, 0.35);
+            color: var(--text-main);
+            font-size: 0.82rem;
+        }
+
+        .form-field input[type="checkbox"] {
+            width: auto;
+        }
+
+        .checkbox-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            min-height: 42px;
+        }
+
+        .btn {
+            width: 100%;
+            padding: 10px 12px;
+            border-radius: 8px;
+            border: 1px solid rgba(0, 242, 255, 0.4);
+            background: rgba(0, 242, 255, 0.08);
+            color: var(--accent-primary);
+            font-size: 0.84rem;
+            font-weight: 700;
+            cursor: pointer;
+        }
+
+        .btn + .btn {
+            margin-top: 8px;
+        }
+
+        .btn.secondary {
+            border-color: rgba(255, 255, 255, 0.12);
+            background: rgba(255, 255, 255, 0.03);
+            color: var(--text-main);
+        }
+
+        .btn.warning {
+            border-color: rgba(255, 183, 3, 0.35);
+            background: rgba(255, 183, 3, 0.08);
+            color: var(--warning);
+        }
+
+        .status-box {
+            min-height: 40px;
+            margin-top: 10px;
+            border-radius: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            background: rgba(255, 255, 255, 0.03);
+            padding: 10px;
+            color: var(--text-dim);
+            font-size: 0.76rem;
+            line-height: 1.45;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+        }
+
+        .calibration-list {
+            display: grid;
+            gap: 8px;
+            margin-top: 10px;
+        }
+
+        .calibration-row {
+            display: grid;
+            grid-template-columns: 42px minmax(0, 1fr) minmax(0, 1fr);
+            gap: 8px;
+            align-items: center;
+        }
+
+        .calibration-row span {
+            color: var(--text-dim);
+            font-size: 0.74rem;
+        }
+
+        .calibration-row input {
+            width: 100%;
+            min-width: 0;
+            box-sizing: border-box;
+            padding: 6px 8px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 6px;
+            background: rgba(0, 0, 0, 0.35);
+            color: var(--text-main);
+            font-size: 0.78rem;
+        }
+
+        .process-map {
+            font-family: "Courier New", monospace;
+            font-size: 0.72rem;
+            line-height: 1.6;
+            color: var(--text-dim);
+            overflow-x: auto;
+            word-break: break-all;
+        }
+
+        .tag {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 2px 8px;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.05);
+            color: var(--text-dim);
+            font-size: 0.72rem;
+        }
+
+        .tag.active {
+            color: var(--accent-primary);
+            background: rgba(0, 242, 255, 0.08);
+        }
+
+        ::-webkit-scrollbar {
+            width: 5px;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.12);
+            border-radius: 999px;
+        }
+
+        @media (max-width: 1280px) {
+            main {
+                grid-template-columns: 1fr;
+                grid-template-rows: 1fr auto auto;
+            }
+
+            .sidebar {
+                max-height: 48vh;
+            }
+
+            .chat-dock {
+                max-height: 200px;
+            }
+        }
+    </style>
+    <script src="jmuxer.min.js"></script>
+</head>
+<body>
+    <header>
+        <div class="logo">Laser-AR Control Console</div>
+        <div class="system-status">
+            <div class="status-item">
+                <div class="status-dot active" id="dot-camera"></div>
+                CAMERA <span id="status-camera">WAIT</span>
+            </div>
+            <div class="status-item">
+                <div class="status-dot" id="dot-npu"></div>
+                NPU <span id="status-npu">WAIT</span>
+            </div>
+            <div class="status-item">
+                <div class="status-dot" id="dot-laser"></div>
+                GALVO <span id="status-laser">WAIT</span>
+            </div>
+        </div>
+    </header>
+
+    <main>
+        <section class="viewport-container" id="viewport">
+            <video id="live-video" autoplay muted playsinline style="display:none"></video>
+            <img id="live-frame" src="frame.jpg" alt="Video Feed">
+            <div class="stream-disabled" id="stream-disabled">
+                视频流已关闭<br>
+                当前仍可进行配置、查看状态与启动自动标定。
+            </div>
+            <div class="crosshair-info" id="pointer-info"></div>
+            <div class="viewport-banner" id="viewport-banner">
+                <strong>监控模式</strong><br>
+                当前使用对象列表进行目标选择。开启校准后，点击画面可采集相机像素点。
+            </div>
+        </section>
+
+        <aside class="sidebar">
+            <nav class="tabs-header">
+                <button class="tab-btn active" data-tab="tab-detect">DETECT</button>
+                <button class="tab-btn" data-tab="tab-calib">CALIB</button>
+                <button class="tab-btn" data-tab="tab-model">MODEL</button>
+                <button class="tab-btn" data-tab="tab-config">CONFIG</button>
+                <button class="tab-btn" data-tab="tab-sys">SYSTEM</button>
+            </nav>
+
+            <section class="tab-content active" id="tab-detect">
+                <div class="safety-banner safety-safe" id="safety-status">System Safe</div>
+
+                <div class="card">
+                    <div class="card-title">运行状态 <span class="tag" id="pending-tag">已同步</span></div>
+                    <div class="stat-grid">
+                        <div class="stat-box">
+                            <span class="stat-label">System FPS</span>
+                            <div class="stat-val" id="val-fps">0.0</div>
+                        </div>
+                        <div class="stat-box">
+                            <span class="stat-label">YOLO Inference</span>
+                            <div class="stat-val" id="val-yolo">0ms</div>
+                        </div>
+                        <div class="stat-box">
+                            <span class="stat-label">Hand Distance</span>
+                            <div class="stat-val" id="val-depth">---</div>
+                        </div>
+                        <div class="stat-box">
+                            <span class="stat-label">Laser State</span>
+                            <div class="stat-val" id="val-laser-stat">OFF</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-title">目标列表 <span id="val-obj-count">0</span></div>
+                    <ul class="obj-list" id="obj-list"></ul>
+                </div>
+
+                <div class="card">
+                    <div class="card-title">当前标识目标</div>
+                    <div class="helper" id="selected-track-summary">尚未选择目标。点击上方目标条目后，可切换矩形框 / 圆形。</div>
+                    <div class="pill-row" style="margin-top: 10px;">
+                        <button class="marker-btn active" data-style="rectangle">矩形框</button>
+                        <button class="marker-btn" data-style="circle">圆形</button>
+                    </div>
+                    <div class="status-box" id="marker-status">当前标识样式：矩形框</div>
+                </div>
+
+                <div class="card">
+                    <div class="card-title">类别标注配置
+                        <button class="btn" id="apply-class-config" style="width:auto;padding:4px 10px;font-size:0.72rem;">应用</button>
+                    </div>
+                    <div id="class-config-list" class="helper">等待类别列表...</div>
+                    <div class="status-box" id="class-config-status" style="margin-top:8px;display:none;"></div>
+                </div>
+            </section>
+
+            <section class="tab-content" id="tab-calib">
+                <div class="card">
+                    <div class="card-title">自动标定</div>
+                    <div class="form-grid">
+                        <div class="form-field">
+                            <label for="auto-calib-port">串口设备</label>
+                            <input id="auto-calib-port" type="text" placeholder="/dev/ttyUSB0">
+                        </div>
+                        <div class="form-field">
+                            <label for="auto-calib-baud">波特率</label>
+                            <input id="auto-calib-baud" type="number" value="115200">
+                        </div>
+                    </div>
+                    <button class="btn" id="btn-calib-start">▶ 启动标定</button>
+                    <button class="btn secondary" id="btn-calib-stop" disabled>■ 停止</button>
+                    <div class="status-box" id="auto-calib-status">就绪。填写串口后点击"启动标定"。</div>
+                </div>
+
+                <div class="card">
+                    <div class="card-title">快速四点标定</div>
+                    <div class="checkbox-row">
+                        <input type="checkbox" id="calib-mode-switch">
+                        <label for="calib-mode-switch">启用校准辅助叠加</label>
+                    </div>
+                    <div class="helper">
+                        开启后，点击左侧画面会依次记录 4 个像素点。然后在下面填写对应振镜坐标，点击“求解矩阵”。
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-title">当前矩阵</div>
+                    <div class="matrix-grid" id="matrix-display"></div>
+                    <div class="status-box" id="calib-result">尚未求解新的坐标映射。</div>
+                </div>
+
+                <div class="card">
+                    <div class="card-title">点对列表</div>
+                    <div class="calibration-list" id="calibration-list"></div>
+                    <button class="btn secondary" id="clear-calibration">清空点位</button>
+                    <button class="btn" id="solve-calibration">求解矩阵</button>
+                    <button class="btn warning" id="apply-calibration">保存并应用标定</button>
+                </div>
+            </section>
+
+            <section class="tab-content" id="tab-model">
+                <div class="card">
+                    <div class="card-title">模型选择</div>
+                    <div class="form-field full">
+                        <label for="model-select">板卡已有模型</label>
+                        <select id="model-select"></select>
+                    </div>
+                    <div class="status-box" id="model-detail">等待加载模型列表...</div>
+                    <button class="btn secondary" id="refresh-models">刷新模型列表</button>
+                    <button class="btn" id="apply-model">设为默认模型并重启</button>
+                </div>
+            </section>
+
+            <section class="tab-content" id="tab-config">
+                <div class="card">
+                    <div class="card-title">必要项配置</div>
+                    <div class="form-grid">
+                        <div class="form-field">
+                            <label for="config-camera-serial">相机序列号</label>
+                            <input id="config-camera-serial" list="camera-serials" placeholder="留空表示自动选择">
+                            <datalist id="camera-serials"></datalist>
+                        </div>
+                        <div class="form-field">
+                            <label for="config-danger-distance">危险距离 (mm)</label>
+                            <input id="config-danger-distance" type="number" min="1">
+                        </div>
+                        <div class="form-field">
+                            <label for="config-conf-thres">置信度阈值</label>
+                            <input id="config-conf-thres" type="number" min="0" max="1" step="0.01">
+                        </div>
+                        <div class="form-field">
+                            <label for="config-laser-serial">激光串口</label>
+                            <input id="config-laser-serial" list="serial-ports" placeholder="/dev/ttyUSB0">
+                            <datalist id="serial-ports"></datalist>
+                        </div>
+                        <div class="form-field">
+                            <label for="config-laser-baudrate">激光波特率</label>
+                            <input id="config-laser-baudrate" type="number" min="9600" step="100">
+                        </div>
+                        <div class="form-field">
+                            <label for="config-pose-model">Pose 模型路径</label>
+                            <input id="config-pose-model" type="text">
+                        </div>
+                        <div class="form-field full">
+                            <label for="config-data-yaml">数据配置文件</label>
+                            <input id="config-data-yaml" type="text">
+                        </div>
+                        <div class="form-field full">
+                            <label for="config-laser-calibration">标定文件路径</label>
+                            <input id="config-laser-calibration" type="text">
+                        </div>
+                        <div class="form-field full">
+                            <label class="checkbox-row">
+                                <input id="config-enable-hand-detection" type="checkbox">
+                                <span>启用手部检测</span>
+                            </label>
+                        </div>
+                        <div class="form-field full">
+                            <label class="checkbox-row">
+                                <input id="config-enable-distance-detection" type="checkbox">
+                                <span>启用距离危险检测</span>
+                            </label>
+                        </div>
+                        <div class="form-field full">
+                            <label class="checkbox-row">
+                                <input id="config-enable-laser" type="checkbox">
+                                <span>启用激光链路</span>
+                            </label>
+                        </div>
+                        <div class="form-field full">
+                            <label class="checkbox-row">
+                                <input id="config-enable-video-stream" type="checkbox">
+                                <span>启用视频流输出（关闭可节约性能，便于校准演示）</span>
+                            </label>
+                        </div>
+                    </div>
+                    <button class="btn" id="apply-config">应用配置并重启</button>
+                    <div class="status-box" id="config-status">修改配置后点击“应用配置并重启”。</div>
+                </div>
+            </section>
+
+            <section class="tab-content" id="tab-sys">
+                <div class="card">
+                    <div class="card-title">运行摘要</div>
+                    <div class="form-grid">
+                        <div class="stat-box">
+                            <span class="stat-label">当前模型</span>
+                            <div class="stat-val mono" id="sys-yolo-model">--</div>
+                        </div>
+                        <div class="stat-box">
+                            <span class="stat-label">置信度阈值</span>
+                            <div class="stat-val mono" id="sys-conf-thres">--</div>
+                        </div>
+                        <div class="stat-box">
+                            <span class="stat-label">当前相机</span>
+                            <div class="stat-val mono" id="sys-cam-serial">--</div>
+                        </div>
+                        <div class="stat-box">
+                            <span class="stat-label">手部后端</span>
+                            <div class="stat-val mono" id="sys-hand-backend">--</div>
+                        </div>
+                        <div class="stat-box">
+                            <span class="stat-label">危险距离</span>
+                            <div class="stat-val mono" id="sys-danger-dist">--</div>
+                        </div>
+                        <div class="stat-box">
+                            <span class="stat-label">标识样式</span>
+                            <div class="stat-val mono" id="sys-marker-style">rectangle</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-title">进程图</div>
+                    <div class="process-map" id="process-map">Loading process tree...</div>
+                </div>
+
+                <div class="card">
+                    <div class="card-title">控制接口</div>
+                    <div class="helper mono">
+                        GET /api/control/config<br>
+                        GET /api/control/models<br>
+                        POST /api/control/config/apply<br>
+                        POST /api/control/models/select<br>
+                        POST /api/control/calibration/solve<br>
+                        POST /api/control/calibration/apply<br>
+                        POST /api/control/marker/select
+                    </div>
+                </div>
+            </section>
+        </aside>
+
+        <!-- Chat dock (bottom bar, spans full width) -->
+        <section class="chat-dock">
+            <div class="chat-header">
+                <h3>LLM Chat</h3>
+                <select id="chatBackend" onchange="chatSwitchBackend()"></select>
+                <span id="chatStatus" class="chat-status"></span>
+            </div>
+            <div id="chatMessages" class="chat-messages"></div>
+            <div class="chat-input-row">
+                <input id="chatInput" type="text" placeholder="Send a message..." autocomplete="off"
+                    onkeydown="if(event.key==='Enter'&&!chatBusy)chatSend()">
+                <button id="chatSendBtn" class="btn-send" onclick="chatSend()">Send</button>
+                <button class="btn-reset" onclick="chatReset()">Reset</button>
+            </div>
+        </section>
+    </main>
+
+    <script>
+        const MARKER_STYLE_LABELS = {
+            rectangle: "矩形框",
+            circle: "圆形",
+        };
+
+        const DOM_CALIB = {
+            autoPort: document.getElementById("auto-calib-port"),
+            autoBaud: document.getElementById("auto-calib-baud"),
+            btnStart: document.getElementById("btn-calib-start"),
+            btnStop: document.getElementById("btn-calib-stop"),
+            status: document.getElementById("auto-calib-status"),
+            classConfigList: document.getElementById("class-config-list"),
+            classConfigStatus: document.getElementById("class-config-status"),
+            applyClassConfig: document.getElementById("apply-class-config"),
+        };
+
+        const DOM = {
+            frame: document.getElementById("live-frame"),
+            video: document.getElementById("live-video"),
+            viewport: document.getElementById("viewport"),
+            streamDisabled: document.getElementById("stream-disabled"),
+            pointerInfo: document.getElementById("pointer-info"),
+            viewportBanner: document.getElementById("viewport-banner"),
+            safety: document.getElementById("safety-status"),
+            objList: document.getElementById("obj-list"),
+            pendingTag: document.getElementById("pending-tag"),
+            matrixDisplay: document.getElementById("matrix-display"),
+            calibrationList: document.getElementById("calibration-list"),
+            calibResult: document.getElementById("calib-result"),
+            markerStatus: document.getElementById("marker-status"),
+            selectedTrackSummary: document.getElementById("selected-track-summary"),
+            modelSelect: document.getElementById("model-select"),
+            modelDetail: document.getElementById("model-detail"),
+            configStatus: document.getElementById("config-status"),
+            valFps: document.getElementById("val-fps"),
+            valYolo: document.getElementById("val-yolo"),
+            valDepth: document.getElementById("val-depth"),
+            valLaser: document.getElementById("val-laser-stat"),
+            valObjCount: document.getElementById("val-obj-count"),
+            sysYolo: document.getElementById("sys-yolo-model"),
+            sysConf: document.getElementById("sys-conf-thres"),
+            sysCam: document.getElementById("sys-cam-serial"),
+            sysHand: document.getElementById("sys-hand-backend"),
+            sysDanger: document.getElementById("sys-danger-dist"),
+            sysMarkerStyle: document.getElementById("sys-marker-style"),
+            processMap: document.getElementById("process-map"),
+            statusCamera: document.getElementById("status-camera"),
+            statusNpu: document.getElementById("status-npu"),
+            statusLaser: document.getElementById("status-laser"),
+            dotCamera: document.getElementById("dot-camera"),
+            dotNpu: document.getElementById("dot-npu"),
+            dotLaser: document.getElementById("dot-laser"),
+            calibModeSwitch: document.getElementById("calib-mode-switch"),
+            clearCalibration: document.getElementById("clear-calibration"),
+            solveCalibration: document.getElementById("solve-calibration"),
+            applyCalibration: document.getElementById("apply-calibration"),
+            refreshModels: document.getElementById("refresh-models"),
+            applyModel: document.getElementById("apply-model"),
+            applyConfig: document.getElementById("apply-config"),
+            cameraSerialInput: document.getElementById("config-camera-serial"),
+            cameraSerials: document.getElementById("camera-serials"),
+            serialPorts: document.getElementById("serial-ports"),
+            configDangerDistance: document.getElementById("config-danger-distance"),
+            configConfThres: document.getElementById("config-conf-thres"),
+            configEnableHandDetection: document.getElementById("config-enable-hand-detection"),
+            configEnableDistanceDetection: document.getElementById("config-enable-distance-detection"),
+            configEnableLaser: document.getElementById("config-enable-laser"),
+            configEnableVideoStream: document.getElementById("config-enable-video-stream"),
+            configLaserSerial: document.getElementById("config-laser-serial"),
+            configLaserBaudrate: document.getElementById("config-laser-baudrate"),
+            configLaserCalibration: document.getElementById("config-laser-calibration"),
+            configPoseModel: document.getElementById("config-pose-model"),
+            configDataYaml: document.getElementById("config-data-yaml"),
+            markerButtons: Array.from(document.querySelectorAll(".marker-btn")),
+            tabButtons: Array.from(document.querySelectorAll(".tab-btn")),
+            tabContents: Array.from(document.querySelectorAll(".tab-content")),
+        };
+
+        const appState = {
+            liveState: {},
+            runtimeConfig: {},
+            appliedConfig: {},
+            models: [],
+            markerState: {
+                selected_track_id: null,
+                marker_style: "rectangle",
+            },
+            selectedTrackId: null,
+            pendingChanges: false,
+            calibrationDraft: {
+                pixelPoints: [null, null, null, null],
+                galvoPoints: [null, null, null, null],
+                solveResult: null,
+            },
+            frameWidth: 640,
+            frameHeight: 480,
+            classNames: [],
+            classConfig: {},
+        };
+
+        let _calibPollTimer = null;
+        let _classConfigDirty = false;
+        let _frameInterval = null;
+        let _stateInterval = null;
+        let _streamSocket = null;
+        let _streamReconnectTimer = null;
+        let _streamBlobUrl = null;
+        let _streamJmuxer = null;
+
+        function switchTab(tabId) {
+            DOM.tabButtons.forEach((btn) => {
+                btn.classList.toggle("active", btn.dataset.tab === tabId);
+            });
+            DOM.tabContents.forEach((content) => {
+                content.classList.toggle("active", content.id === tabId);
+            });
+        }
+
+        DOM.tabButtons.forEach((btn) => {
+            btn.addEventListener("click", () => switchTab(btn.dataset.tab));
+        });
+
+        async function apiFetch(path, options = {}) {
+            const response = await fetch(path, {
+                headers: {
+                    "Content-Type": "application/json",
+                    ...(options.headers || {}),
+                },
+                ...options,
+            });
+            const text = await response.text();
+            const payload = text ? JSON.parse(text) : {};
+            if (!response.ok) {
+                throw new Error(payload.error || `HTTP ${response.status}`);
+            }
+            return payload;
+        }
+
+        function setPendingChanges(flag) {
+            appState.pendingChanges = flag;
+            DOM.pendingTag.textContent = flag ? "待应用" : "已同步";
+            DOM.pendingTag.classList.toggle("active", flag);
+        }
+
+        function projectToGalvo(px, py) {
+            const matrix = appState.liveState.homography_matrix || appState.calibrationDraft.solveResult?.homography_matrix;
+            if (!matrix) {
+                return null;
+            }
+            const z = matrix[2][0] * px + matrix[2][1] * py + matrix[2][2];
+            if (!z) {
+                return null;
+            }
+            const gx = (matrix[0][0] * px + matrix[0][1] * py + matrix[0][2]) / z;
+            const gy = (matrix[1][0] * px + matrix[1][1] * py + matrix[1][2]) / z;
+            return {
+                x: Math.round(gx),
+                y: Math.round(gy),
+            };
+        }
+
+        function isVideoStreamEnabled() {
+            return appState.runtimeConfig.enable_video_stream !== false;
+        }
+
+        function getActiveViewportElement() {
+            if (DOM.video.style.display !== "none" && DOM.video.clientWidth > 0 && DOM.video.clientHeight > 0) {
+                return DOM.video;
+            }
+            if (DOM.frame.style.display !== "none" && DOM.frame.clientWidth > 0 && DOM.frame.clientHeight > 0) {
+                return DOM.frame;
+            }
+            return DOM.viewport;
+        }
+
+        function getViewportPixel(event) {
+            const rect = getActiveViewportElement().getBoundingClientRect();
+            const safeWidth = Math.max(rect.width, 1);
+            const safeHeight = Math.max(rect.height, 1);
+            const x = Math.round(((event.clientX - rect.left) / safeWidth) * appState.frameWidth);
+            const y = Math.round(((event.clientY - rect.top) / safeHeight) * appState.frameHeight);
+            return {x, y};
+        }
+
+        function renderMatrix(matrix) {
+            const effective = matrix || [
+                [1, 0, 0],
+                [0, 1, 0],
+                [0, 0, 1],
+            ];
+            DOM.matrixDisplay.innerHTML = effective.flat().map((value) => {
+                const numeric = Number(value);
+                const display = Number.isFinite(numeric) ? numeric.toFixed(4) : String(value);
+                return `<div class="matrix-cell">${display}</div>`;
+            }).join("");
+        }
+
+        function renderClassConfig() {
+            const names = appState.classNames;
+            if (!names.length) {
+                DOM_CALIB.classConfigList.textContent = "暂无类别（需连接 NPU 后获取）。";
+                return;
+            }
+            DOM_CALIB.classConfigList.innerHTML = "";
+            names.forEach((name) => {
+                if (!appState.classConfig[name]) {
+                    appState.classConfig[name] = {enabled: true, style: "rectangle"};
+                }
+                const cfg = appState.classConfig[name];
+                const row = document.createElement("div");
+                row.style.cssText = "display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--border);";
+                row.innerHTML = `
+                    <label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;min-width:0;">
+                        <input type="checkbox" data-class="${name}" class="cls-toggle" ${cfg.enabled ? "checked" : ""}>
+                        <span style="font-size:0.82rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${name}</span>
+                    </label>
+                    <button class="choice-btn ${cfg.style === "rectangle" ? "active" : ""}" data-class="${name}" data-style="rectangle" style="padding:4px 8px;font-size:0.72rem;">矩形</button>
+                    <button class="choice-btn ${cfg.style === "circle" ? "active" : ""}" data-class="${name}" data-style="circle" style="padding:4px 8px;font-size:0.72rem;">圆形</button>
+                `;
+                DOM_CALIB.classConfigList.appendChild(row);
+            });
+
+            DOM_CALIB.classConfigList.querySelectorAll(".cls-toggle").forEach((cb) => {
+                cb.addEventListener("change", () => {
+                    appState.classConfig[cb.dataset.class].enabled = cb.checked;
+                });
+            });
+            DOM_CALIB.classConfigList.querySelectorAll(".choice-btn").forEach((btn) => {
+                btn.addEventListener("click", () => {
+                    const cn = btn.dataset.class;
+                    appState.classConfig[cn].style = btn.dataset.style;
+                    DOM_CALIB.classConfigList.querySelectorAll(`.choice-btn[data-class="${cn}"]`).forEach((b) => {
+                        b.classList.toggle("active", b.dataset.style === btn.dataset.style);
+                    });
+                });
+            });
+        }
+
+        DOM_CALIB.classConfigList.addEventListener("change", () => { _classConfigDirty = true; });
+        DOM_CALIB.classConfigList.addEventListener("click", (e) => { if (e.target.classList.contains("choice-btn")) _classConfigDirty = true; });
+
+        DOM_CALIB.applyClassConfig.addEventListener("click", async () => {
+            try {
+                await apiFetch("/api/control/marker/class-config", {
+                    method: "POST",
+                    body: JSON.stringify({class_config: appState.classConfig}),
+                });
+                _classConfigDirty = false;
+                DOM_CALIB.classConfigStatus.style.display = "";
+                DOM_CALIB.classConfigStatus.textContent = "类别配置已保存。";
+            } catch (err) {
+                DOM_CALIB.classConfigStatus.style.display = "";
+                DOM_CALIB.classConfigStatus.textContent = `保存失败：${err.message}`;
+            }
+        });
+
+        function _setCalibRunning(running) {
+            DOM_CALIB.btnStart.disabled = running;
+            DOM_CALIB.btnStop.disabled = !running;
+        }
+
+        async function _pollCalibStatus() {
+            try {
+                const st = await apiFetch("/api/control/calibration/status");
+                DOM_CALIB.status.textContent = st.log_tail || (st.running ? "运行中..." : "已停止");
+                if (!st.running) {
+                    clearInterval(_calibPollTimer);
+                    _calibPollTimer = null;
+                    _setCalibRunning(false);
+                    if (st.exit_code === 0) {
+                        DOM_CALIB.status.textContent += "\n\n✓ 标定完成，正在刷新配置...";
+                        fetchControlConfig();
+                    }
+                }
+            } catch (_) {}
+        }
+
+        DOM_CALIB.btnStart.addEventListener("click", async () => {
+            const serial_port = DOM_CALIB.autoPort.value.trim();
+            const baudrate = Number(DOM_CALIB.autoBaud.value) || 115200;
+            if (!serial_port) {
+                DOM_CALIB.status.textContent = "请填写串口设备路径。";
+                return;
+            }
+            try {
+                const result = await apiFetch("/api/control/calibration/run", {
+                    method: "POST",
+                    body: JSON.stringify({serial_port, baudrate}),
+                });
+                _setCalibRunning(true);
+                DOM_CALIB.status.textContent = result.overwrite_existing
+                    ? `标定进程已启动，完成后将覆写现有标定文件：${result.output_path}`
+                    : `标定进程已启动，输出文件：${result.output_path}`;
+                if (_calibPollTimer) clearInterval(_calibPollTimer);
+                _calibPollTimer = setInterval(_pollCalibStatus, 1000);
+            } catch (err) {
+                DOM_CALIB.status.textContent = `启动失败：${err.message}`;
+            }
+        });
+
+        DOM_CALIB.btnStop.addEventListener("click", async () => {
+            try {
+                await apiFetch("/api/control/calibration/stop", {method: "POST", body: "{}"});
+                DOM_CALIB.status.textContent += "\n正在停止...";
+            } catch (err) {
+                DOM_CALIB.status.textContent = `停止失败：${err.message}`;
+            }
+        });
+
+        function renderCalibrationRows() {
+            DOM.calibrationList.innerHTML = "";
+            for (let index = 0; index < 4; index += 1) {
+                const point = appState.calibrationDraft.pixelPoints[index];
+                const galvoPoint = appState.calibrationDraft.galvoPoints[index];
+                const row = document.createElement("div");
+                row.className = "calibration-row";
+                row.innerHTML = `
+                    <span>P${index + 1}</span>
+                    <input class="mono" id="pixel-point-${index}" value="${point ? `${point.x}, ${point.y}` : ""}" placeholder="点击左侧画面采集" readonly>
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+                        <input class="mono" id="galvo-x-${index}" type="number" placeholder="GX" value="${galvoPoint ? galvoPoint.x : ""}">
+                        <input class="mono" id="galvo-y-${index}" type="number" placeholder="GY" value="${galvoPoint ? galvoPoint.y : ""}">
+                    </div>
+                `;
+                DOM.calibrationList.appendChild(row);
+                const gxInput = row.querySelector(`#galvo-x-${index}`);
+                const gyInput = row.querySelector(`#galvo-y-${index}`);
+                const updateGalvoPoint = () => {
+                    const gx = Number(gxInput.value);
+                    const gy = Number(gyInput.value);
+                    if (Number.isFinite(gx) && Number.isFinite(gy)) {
+                        appState.calibrationDraft.galvoPoints[index] = {x: gx, y: gy};
+                    } else {
+                        appState.calibrationDraft.galvoPoints[index] = null;
+                    }
+                };
+                gxInput.addEventListener("input", updateGalvoPoint);
+                gyInput.addEventListener("input", updateGalvoPoint);
+            }
+        }
+
+        function renderObjectList() {
+            const objects = appState.liveState.object_details || [];
+            DOM.valObjCount.textContent = String(appState.liveState.objects || objects.length || 0);
+            if (!objects.length) {
+                DOM.objList.innerHTML = '<li class="obj-item"><div class="obj-meta"><div class="obj-name">暂无目标</div><div class="obj-extra">等待 state.json 输出对象列表。</div></div></li>';
+                return;
+            }
+            DOM.objList.innerHTML = "";
+            objects.forEach((obj) => {
+                const item = document.createElement("li");
+                item.className = "obj-item";
+                if (obj.track_id === appState.selectedTrackId) {
+                    item.classList.add("active");
+                }
+                const markerTag = obj.track_id === appState.selectedTrackId
+                    ? `<span class="tag active">${MARKER_STYLE_LABELS[appState.markerState.marker_style] || "矩形框"}</span>`
+                    : "";
+                item.innerHTML = `
+                    <div class="obj-id">#${obj.track_id ?? "?"}</div>
+                    <div class="obj-meta">
+                        <div class="obj-name">${obj.name || "unknown"} ${markerTag}</div>
+                        <div class="obj-extra">置信度 ${(Number(obj.score || 0) * 100).toFixed(0)}% | ${obj.box ? obj.box.join(", ") : "无框"}</div>
+                    </div>
+                    <div class="obj-score">${(Number(obj.score || 0) * 100).toFixed(0)}%</div>
+                `;
+                item.addEventListener("click", () => handleSelectTarget(obj.track_id));
+                DOM.objList.appendChild(item);
+            });
+        }
+
+        function renderSelectedTarget() {
+            const trackId = appState.selectedTrackId;
+            const label = trackId === null ? "尚未选择目标。" : `当前目标 Track #${trackId}`;
+            DOM.selectedTrackSummary.textContent = `${label} 点击“矩形框 / 圆形”可以切换标识输出样式。`;
+            const markerStyle = appState.markerState.marker_style || "rectangle";
+            DOM.markerButtons.forEach((button) => {
+                button.classList.toggle("active", button.dataset.style === markerStyle);
+            });
+            DOM.markerStatus.textContent = `当前标识样式：${MARKER_STYLE_LABELS[markerStyle] || markerStyle}`;
+            DOM.sysMarkerStyle.textContent = markerStyle;
+        }
+
+        function renderConfigForm() {
+            const config = appState.runtimeConfig;
+            DOM.cameraSerialInput.value = config.camera_serial || "";
+            DOM.configDangerDistance.value = config.danger_distance ?? 300;
+            DOM.configConfThres.value = config.conf_thres ?? 0.55;
+            DOM.configEnableHandDetection.checked = Boolean(config.enable_hand_detection);
+            DOM.configEnableDistanceDetection.checked = config.enable_distance_detection !== false;
+            DOM.configEnableLaser.checked = Boolean(config.enable_laser);
+            DOM.configEnableVideoStream.checked = config.enable_video_stream !== false;
+            DOM.configLaserSerial.value = config.laser_serial || "/dev/ttyUSB0";
+            DOM.configLaserBaudrate.value = config.laser_baudrate ?? 115200;
+            DOM.configLaserCalibration.value = config.laser_calibration || "";
+            DOM.configPoseModel.value = config.pose_model || "";
+            DOM.configDataYaml.value = config.data_yaml || "";
+        }
+
+        function renderControlSources(payload) {
+            const cameraOptions = payload.available_camera_serials || [];
+            DOM.cameraSerials.innerHTML = cameraOptions.map((value) => `<option value="${value}"></option>`).join("");
+            const serialOptions = payload.available_serial_ports || [];
+            DOM.serialPorts.innerHTML = serialOptions.map((value) => `<option value="${value}"></option>`).join("");
+            appState.models = payload.available_models || [];
+            renderModelSelect();
+        }
+
+        function renderModelSelect() {
+            const models = appState.models;
+            if (!models.length) {
+                DOM.modelSelect.innerHTML = '<option value="">未发现候选模型</option>';
+                DOM.modelDetail.textContent = "未在允许目录中发现 .om / .mindir 模型。";
+                return;
+            }
+            DOM.modelSelect.innerHTML = models.map((item) => {
+                const selected = item.path === appState.runtimeConfig.yolo_model ? "selected" : "";
+                return `<option value="${item.path}" ${selected}>${item.name}</option>`;
+            }).join("");
+            const current = models.find((item) => item.path === DOM.modelSelect.value) || models[0];
+            DOM.modelDetail.textContent = `当前选择：${current.name}\n路径：${current.path}`;
+        }
+
+        function renderSystemSummary() {
+            const state = appState.liveState;
+            const config = state.config || appState.runtimeConfig;
+            DOM.sysYolo.textContent = config.yolo_model || "--";
+            DOM.sysConf.textContent = String(config.conf_thres ?? "--");
+            DOM.sysCam.textContent = state.camera_serial || appState.runtimeConfig.camera_serial || "--";
+            DOM.sysHand.textContent = state.hand_backend || "--";
+            DOM.sysDanger.textContent = String(config.danger_distance ?? "--");
+            const pidMap = state.worker_pids || {};
+            const entries = Object.entries(pidMap);
+            DOM.processMap.innerHTML = entries.length
+                ? entries.map(([name, pid]) => `${name.padEnd(16)} PID ${pid}`).join("<br>")
+                : "暂无 worker 进程信息。";
+        }
+
+        function updateLiveStateUI() {
+            const state = appState.liveState;
+            DOM.valFps.textContent = Number(state.fps || 0).toFixed(1);
+            DOM.valYolo.textContent = `${Number(state.yolo_ms || 0).toFixed(0)}ms`;
+            DOM.valDepth.textContent = state.min_depth_mm ? `${Number(state.min_depth_mm).toFixed(0)}mm` : "---";
+            DOM.valLaser.textContent = state.laser_active ? "ACTIVE" : (state.laser_enabled ? "READY" : "OFF");
+            DOM.valLaser.style.color = state.laser_active ? "var(--accent-primary)" : (state.laser_enabled ? "var(--safe)" : "var(--danger)");
+            DOM.safety.textContent = state.is_danger ? "Danger: Hand Detected" : "System Safe";
+            DOM.safety.className = state.is_danger ? "safety-banner safety-danger" : "safety-banner safety-safe";
+
+            DOM.dotCamera.classList.toggle("active", Boolean(state.camera_serial));
+            DOM.dotNpu.classList.toggle("active", Number(state.fps || 0) > 0);
+            DOM.dotLaser.classList.toggle("active", Boolean(state.laser_enabled));
+            DOM.statusCamera.textContent = state.camera_serial ? "ONLINE" : "WAIT";
+            DOM.statusNpu.textContent = Number(state.fps || 0) > 0 ? "ONLINE" : "WAIT";
+            DOM.statusLaser.textContent = state.laser_enabled ? "READY" : "OFF";
+
+            if (state.marker_state) {
+                appState.markerState = state.marker_state;
+                appState.selectedTrackId = state.marker_state.selected_track_id;
+            }
+            if (state.frame_width) {
+                appState.frameWidth = state.frame_width;
+            }
+            if (state.frame_height) {
+                appState.frameHeight = state.frame_height;
+            }
+
+            renderObjectList();
+            renderSelectedTarget();
+            renderSystemSummary();
+            renderMatrix(state.homography_matrix || appState.calibrationDraft.solveResult?.homography_matrix || null);
+        }
+
+        async function fetchState() {
+            try {
+                const response = await fetch(`state.json?t=${Date.now()}`);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                appState.liveState = await response.json();
+                updateLiveStateUI();
+            } catch (error) {
+                console.error("State sync failed", error);
+            }
+        }
+
+        async function fetchControlConfig() {
+            if (appState.pendingChanges) {
+                return;
+            }
+            try {
+                const payload = await apiFetch("/api/control/config");
+                appState.runtimeConfig = {...payload.config};
+                appState.appliedConfig = {...payload.config};
+                appState.markerState = payload.marker_state || appState.markerState;
+                appState.selectedTrackId = appState.markerState.selected_track_id;
+                if (Array.isArray(payload.class_names)) {
+                    appState.classNames = payload.class_names;
+                }
+                if (!_classConfigDirty && payload.marker_state && payload.marker_state.class_config) {
+                    appState.classConfig = {...payload.marker_state.class_config};
+                }
+                DOM_CALIB.autoPort.value = appState.runtimeConfig.laser_serial || "";
+                DOM_CALIB.autoBaud.value = appState.runtimeConfig.laser_baudrate || 115200;
+                renderConfigForm();
+                renderControlSources(payload);
+                syncVideoTransport();
+                renderSelectedTarget();
+                renderClassConfig();
+                renderSystemSummary();
+                setPendingChanges(false);
+            } catch (error) {
+                DOM.configStatus.textContent = `读取控制配置失败：${error.message}`;
+            }
+        }
+
+        async function refreshModels() {
+            try {
+                const payload = await apiFetch("/api/control/models");
+                appState.models = payload.models || [];
+                appState.runtimeConfig.yolo_model = payload.current_model || appState.runtimeConfig.yolo_model;
+                renderModelSelect();
+            } catch (error) {
+                DOM.modelDetail.textContent = `刷新模型失败：${error.message}`;
+            }
+        }
+
+        async function handleSelectTarget(trackId) {
+            try {
+                const payload = await apiFetch("/api/control/marker/select", {
+                    method: "POST",
+                    body: JSON.stringify({
+                        selected_track_id: trackId,
+                        marker_style: appState.markerState.marker_style || "rectangle",
+                    }),
+                });
+                appState.markerState = payload.marker_state;
+                appState.selectedTrackId = payload.marker_state.selected_track_id;
+                renderObjectList();
+                renderSelectedTarget();
+            } catch (error) {
+                DOM.markerStatus.textContent = `更新目标选择失败：${error.message}`;
+            }
+        }
+
+        async function handleMarkerStyleChange(style) {
+            if (appState.selectedTrackId === null) {
+                DOM.markerStatus.textContent = "请先在目标列表中选择一个 Track，再切换标识样式。";
+                return;
+            }
+            try {
+                const payload = await apiFetch("/api/control/marker/select", {
+                    method: "POST",
+                    body: JSON.stringify({
+                        selected_track_id: appState.selectedTrackId,
+                        marker_style: style,
+                    }),
+                });
+                appState.markerState = payload.marker_state;
+                renderObjectList();
+                renderSelectedTarget();
+            } catch (error) {
+                DOM.markerStatus.textContent = `更新标识样式失败：${error.message}`;
+            }
+        }
+
+        DOM.markerButtons.forEach((button) => {
+            button.addEventListener("click", () => handleMarkerStyleChange(button.dataset.style));
+        });
+
+        function markDraftPoint(point) {
+            const index = appState.calibrationDraft.pixelPoints.findIndex((item) => item === null);
+            if (index === -1) {
+                DOM.calibResult.textContent = "四个像素点已采集完成。若需重采，请先点击“清空点位”。";
+                return;
+            }
+            appState.calibrationDraft.pixelPoints[index] = point;
+            const guess = projectToGalvo(point.x, point.y);
+            if (guess) {
+                appState.calibrationDraft.galvoPoints[index] = {x: guess.x, y: guess.y};
+            }
+            renderCalibrationRows();
+            DOM.calibResult.textContent = `已记录第 ${index + 1} 个像素点：(${point.x}, ${point.y})`;
+        }
+
+        DOM.viewport.addEventListener("mousemove", (event) => {
+            const pixel = getViewportPixel(event);
+            const galvo = projectToGalvo(pixel.x, pixel.y);
+            DOM.pointerInfo.style.display = "block";
+            DOM.pointerInfo.style.left = `${event.clientX + 14}px`;
+            DOM.pointerInfo.style.top = `${event.clientY + 14}px`;
+            DOM.pointerInfo.innerHTML = [
+                `PX: (${pixel.x}, ${pixel.y})`,
+                `GV: ${galvo ? `(${galvo.x}, ${galvo.y})` : "未标定"}`,
+            ].join("<br>");
+        });
+
+        DOM.viewport.addEventListener("mouseleave", () => {
+            DOM.pointerInfo.style.display = "none";
+        });
+
+        DOM.viewport.addEventListener("click", (event) => {
+            const pixel = getViewportPixel(event);
+            const galvo = projectToGalvo(pixel.x, pixel.y);
+            if (DOM.calibModeSwitch.checked) {
+                markDraftPoint(pixel);
+                return;
+            }
+            if (galvo) {
+                DOM.viewportBanner.innerHTML = `<strong>监控模式</strong><br>当前点击位置：PX (${pixel.x}, ${pixel.y}) / GV (${galvo.x}, ${galvo.y})`;
+            } else {
+                DOM.viewportBanner.innerHTML = `<strong>监控模式</strong><br>当前点击位置：PX (${pixel.x}, ${pixel.y})，尚未建立有效标定矩阵。`;
+            }
+        });
+
+        DOM.calibModeSwitch.addEventListener("change", () => {
+            DOM.viewportBanner.innerHTML = DOM.calibModeSwitch.checked
+                ? "<strong>校准模式</strong><br>请依次点击画面中的 4 个像素点，并填写对应振镜坐标。"
+                : "<strong>监控模式</strong><br>当前使用对象列表进行目标选择。开启校准后，点击画面可采集相机像素点。";
+        });
+
+        DOM.clearCalibration.addEventListener("click", () => {
+            appState.calibrationDraft.pixelPoints = [null, null, null, null];
+            appState.calibrationDraft.galvoPoints = [null, null, null, null];
+            appState.calibrationDraft.solveResult = null;
+            renderCalibrationRows();
+            renderMatrix(appState.liveState.homography_matrix || null);
+            DOM.calibResult.textContent = "已清空四点标定草稿。";
+        });
+
+        function collectCalibrationPayload() {
+            const pixelPoints = [];
+            const galvoPoints = [];
+            for (let index = 0; index < 4; index += 1) {
+                const pixel = appState.calibrationDraft.pixelPoints[index];
+                const galvo = appState.calibrationDraft.galvoPoints[index];
+                if (!pixel) {
+                    throw new Error(`第 ${index + 1} 个像素点尚未采集`);
+                }
+                if (!galvo) {
+                    throw new Error(`第 ${index + 1} 个振镜坐标未填写完整`);
+                }
+                pixelPoints.push([pixel.x, pixel.y]);
+                galvoPoints.push([galvo.x, galvo.y]);
+            }
+            return {
+                pixel_points: pixelPoints,
+                galvo_points: galvoPoints,
+                calibration_file: appState.runtimeConfig.laser_calibration,
+            };
+        }
+
+        DOM.solveCalibration.addEventListener("click", async () => {
+            try {
+                const payload = collectCalibrationPayload();
+                const result = await apiFetch("/api/control/calibration/solve", {
+                    method: "POST",
+                    body: JSON.stringify(payload),
+                });
+                appState.calibrationDraft.solveResult = result;
+                renderMatrix(result.homography_matrix);
+                DOM.calibResult.textContent = `求解成功：mean_error=${result.mean_error.toFixed(4)} max_error=${result.max_error.toFixed(4)}`;
+            } catch (error) {
+                DOM.calibResult.textContent = `求解失败：${error.message}`;
+            }
+        });
+
+        DOM.applyCalibration.addEventListener("click", async () => {
+            try {
+                const payload = collectCalibrationPayload();
+                const result = await apiFetch("/api/control/calibration/apply", {
+                    method: "POST",
+                    body: JSON.stringify(payload),
+                });
+                DOM.calibResult.textContent = `标定已保存：${result.calibration_file}\n系统将按新的 homography 重启。`;
+                setPendingChanges(false);
+            } catch (error) {
+                DOM.calibResult.textContent = `保存标定失败：${error.message}`;
+            }
+        });
+
+        DOM.refreshModels.addEventListener("click", refreshModels);
+
+        DOM.modelSelect.addEventListener("change", () => {
+            const current = appState.models.find((item) => item.path === DOM.modelSelect.value);
+            if (current) {
+                DOM.modelDetail.textContent = `当前选择：${current.name}\n路径：${current.path}`;
+            }
+            setPendingChanges(true);
+        });
+
+        DOM.applyModel.addEventListener("click", async () => {
+            try {
+                const payload = await apiFetch("/api/control/models/select", {
+                    method: "POST",
+                    body: JSON.stringify({model_path: DOM.modelSelect.value}),
+                });
+                DOM.modelDetail.textContent = `模型已切换为：${payload.config.yolo_model}\n系统将自动重启。`;
+                setPendingChanges(false);
+            } catch (error) {
+                DOM.modelDetail.textContent = `切换模型失败：${error.message}`;
+            }
+        });
+
+        function collectConfigPayload() {
+            return {
+                camera_serial: DOM.cameraSerialInput.value.trim(),
+                danger_distance: Number(DOM.configDangerDistance.value),
+                conf_thres: Number(DOM.configConfThres.value),
+                enable_hand_detection: Boolean(DOM.configEnableHandDetection.checked),
+                enable_distance_detection: Boolean(DOM.configEnableDistanceDetection.checked),
+                enable_laser: Boolean(DOM.configEnableLaser.checked),
+                enable_video_stream: Boolean(DOM.configEnableVideoStream.checked),
+                laser_serial: DOM.configLaserSerial.value.trim(),
+                laser_baudrate: Number(DOM.configLaserBaudrate.value),
+                laser_calibration: DOM.configLaserCalibration.value.trim(),
+                pose_model: DOM.configPoseModel.value.trim(),
+                data_yaml: DOM.configDataYaml.value.trim(),
+                yolo_model: DOM.modelSelect.value || appState.runtimeConfig.yolo_model,
+                marker_style: appState.markerState.marker_style || "rectangle",
+            };
+        }
+
+        [
+            DOM.cameraSerialInput,
+            DOM.configDangerDistance,
+            DOM.configConfThres,
+            DOM.configEnableHandDetection,
+            DOM.configEnableDistanceDetection,
+            DOM.configEnableLaser,
+            DOM.configEnableVideoStream,
+            DOM.configLaserSerial,
+            DOM.configLaserBaudrate,
+            DOM.configLaserCalibration,
+            DOM.configPoseModel,
+            DOM.configDataYaml,
+        ].forEach((element) => {
+            element.addEventListener("change", () => setPendingChanges(true));
+        });
+
+        DOM.applyConfig.addEventListener("click", async () => {
+            try {
+                const payload = collectConfigPayload();
+                const result = await apiFetch("/api/control/config/apply", {
+                    method: "POST",
+                    body: JSON.stringify(payload),
+                });
+                DOM.configStatus.textContent = `配置已写入，计划重启日志：${result.restart.log}`;
+                setPendingChanges(false);
+            } catch (error) {
+                DOM.configStatus.textContent = `应用配置失败：${error.message}`;
+            }
+        });
+
+        function startPolling() {
+            if (!isVideoStreamEnabled()) {
+                return;
+            }
+            if (!_frameInterval) _frameInterval = setInterval(() => {
+                DOM.frame.src = `frame.jpg?t=${Date.now()}`;
+            }, 40);
+        }
+
+        function stopPolling() {
+            clearInterval(_frameInterval); _frameInterval = null;
+        }
+
+        function startStatePolling() {
+            if (!_stateInterval) _stateInterval = setInterval(fetchState, 250);
+        }
+
+        function stopStatePolling() {
+            clearInterval(_stateInterval); _stateInterval = null;
+        }
+
+        function teardownStreamSession() {
+            if (_streamReconnectTimer) {
+                clearTimeout(_streamReconnectTimer);
+                _streamReconnectTimer = null;
+            }
+            if (_streamSocket) {
+                _streamSocket.onclose = null;
+                _streamSocket.onerror = null;
+                _streamSocket.onmessage = null;
+                try {
+                    _streamSocket.close();
+                } catch (_) {}
+                _streamSocket = null;
+            }
+            if (_streamJmuxer) {
+                _streamJmuxer.destroy();
+                _streamJmuxer = null;
+            }
+            if (_streamBlobUrl) {
+                URL.revokeObjectURL(_streamBlobUrl);
+                _streamBlobUrl = null;
+            }
+            DOM.video.style.display = "none";
+            DOM.video.removeAttribute("src");
+        }
+
+        function syncVideoTransport() {
+            const enabled = isVideoStreamEnabled();
+            DOM.streamDisabled.style.display = enabled ? "none" : "block";
+            if (!enabled) {
+                stopPolling();
+                teardownStreamSession();
+                DOM.frame.style.display = "none";
+                DOM.frame.removeAttribute("src");
+                return;
+            }
+            DOM.frame.style.display = "";
+            startPolling();
+            connectStream();
+        }
+
+        function connectStream() {
+            if (!isVideoStreamEnabled()) {
+                return;
+            }
+            if (_streamSocket && (_streamSocket.readyState === WebSocket.OPEN || _streamSocket.readyState === WebSocket.CONNECTING)) {
+                return;
+            }
+            const wsPort = 8003;
+            const ws = new WebSocket(`ws://${location.hostname}:${wsPort}/stream`);
+            _streamSocket = ws;
+            ws.binaryType = 'arraybuffer';
+            let mode = null;
+
+            ws.onmessage = (e) => {
+                if (typeof e.data === 'string') {
+                    const msg = JSON.parse(e.data);
+                    if (msg.type === 'init') {
+                        mode = msg.codec;
+                        if (mode === 'avc1.42E01E' && typeof JMuxer !== 'undefined') {
+                            if (_streamJmuxer) {
+                                _streamJmuxer.destroy();
+                            }
+                            _streamJmuxer = new JMuxer({ node: 'live-video', mode: 'video',
+                                                         fps: msg.fps, flushingTime: 0 });
+                            DOM.video.style.display = ''; DOM.frame.style.display = 'none';
+                        } else {
+                            DOM.video.style.display = 'none'; DOM.frame.style.display = '';
+                        }
+                        stopPolling();
+                    } else {
+                        appState.liveState = msg;
+                        updateLiveStateUI();
+                    }
+                } else if (e.data instanceof ArrayBuffer) {
+                    if (mode === 'avc1.42E01E' && _streamJmuxer) {
+                        _streamJmuxer.feed({ video: new Uint8Array(e.data) });
+                    } else {
+                        if (_streamBlobUrl) URL.revokeObjectURL(_streamBlobUrl);
+                        const blob = new Blob([e.data], { type: 'image/jpeg' });
+                        _streamBlobUrl = URL.createObjectURL(blob);
+                        DOM.frame.src = _streamBlobUrl;
+                    }
+                }
+            };
+            ws.onclose = ws.onerror = () => {
+                if (_streamSocket !== ws) {
+                    return;
+                }
+                _streamSocket = null;
+                if (_streamJmuxer) {
+                    _streamJmuxer.destroy();
+                    _streamJmuxer = null;
+                }
+                DOM.video.style.display = 'none';
+                if (isVideoStreamEnabled()) {
+                    DOM.frame.style.display = '';
+                    startPolling();
+                    if (_streamReconnectTimer) {
+                        clearTimeout(_streamReconnectTimer);
+                    }
+                    _streamReconnectTimer = setTimeout(() => {
+                        _streamReconnectTimer = null;
+                        connectStream();
+                    }, 2000);
+                }
+            };
+        }
+
+        (function startLoops() {
+            fetchControlConfig();
+            fetchState();
+            renderCalibrationRows();
+            renderMatrix(null);
+            setInterval(fetchControlConfig, 3000);
+            startStatePolling();
+            syncVideoTransport();
+        })();
+
+        /* ── Chat ── */
+        const chatMsgs = document.getElementById('chatMessages');
+        const chatIn = document.getElementById('chatInput');
+        const chatSendBtn = document.getElementById('chatSendBtn');
+        const chatBackendSel = document.getElementById('chatBackend');
+        const chatStatusEl = document.getElementById('chatStatus');
+        let chatBusy = false;
+
+        function addMsg(role, text, meta) {
+            const d = document.createElement('div');
+            d.style.cssText = 'margin-bottom:10px;padding:8px 12px;border-radius:8px;max-width:85%;line-height:1.5;word-wrap:break-word;'
+                + (role==='user' ? 'background:rgba(0,120,255,0.2);border:1px solid rgba(0,120,255,0.3);margin-left:auto;text-align:right' : 'background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1)');
+            d.innerHTML = '<div style="font-size:0.7em;color:#888">' + (role==='user'?'You':'LLM') + '</div>'
+                + '<div>' + text.replace(/\n/g,'<br>') + '</div>'
+                + (meta ? '<div style="font-size:0.65em;color:#666;margin-top:4px">'+meta+'</div>' : '');
+            chatMsgs.appendChild(d);
+            chatMsgs.scrollTop = chatMsgs.scrollHeight;
+            return d;
+        }
+
+        async function chatSend() {
+            const msg = chatIn.value.trim();
+            if (!msg || chatBusy) return;
+            chatBusy = true; chatSendBtn.disabled = true; chatIn.value = '';
+            addMsg('user', msg);
+            const sp = addMsg('assistant', '<span style="display:inline-block;width:12px;height:12px;border:2px solid rgba(255,255,255,0.2);border-top-color:#00d4ff;border-radius:50%;animation:spin 0.6s linear infinite"></span> Thinking...');
+            try {
+                const ac = new AbortController();
+                const tid = setTimeout(() => ac.abort(), 120000);
+                const r = await fetch('/api/chat/send', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({message:msg}), signal:ac.signal});
+                clearTimeout(tid);
+                const d = await r.json();
+                if (d.error) { sp.children[1].innerHTML = '⚠ ' + d.error; }
+                else {
+                    sp.children[1].innerHTML = d.reply.replace(/\n/g,'<br>');
+                }
+            } catch(e) { sp.children[1].innerHTML = e.name==='AbortError' ? '⚠ 请求超时（模型加载中，请重试）' : '⚠ 网络错误: '+e.message; }
+            chatMsgs.scrollTop = chatMsgs.scrollHeight;
+            chatBusy = false; chatSendBtn.disabled = false; chatIn.focus();
+        }
+
+        async function chatReset() {
+            await fetch('/api/chat/reset', {method:'POST'});
+            chatMsgs.innerHTML = '';
+            addMsg('assistant', 'Conversation reset.');
+        }
+
+        async function chatSwitchBackend() {
+            const name = chatBackendSel.value;
+            chatStatusEl.textContent = 'Switching...';
+            try {
+                const r = await fetch('/api/chat/switch', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({backend:name})});
+                const d = await r.json();
+                chatStatusEl.textContent = d.ok ? '✓ ' + name : '⚠ ' + (d.error||'failed');
+            } catch(e) { chatStatusEl.textContent = '⚠ error'; }
+        }
+
+        (async function initChat() {
+            try {
+                const r = await fetch('/api/chat/status');
+                const d = await r.json();
+                if (d.backends) {
+                    chatBackendSel.innerHTML = '';
+                    for (const [k,v] of Object.entries(d.backends)) {
+                        const o = document.createElement('option');
+                        o.value = k; o.textContent = v;
+                        if (k === d.backend) o.selected = true;
+                        chatBackendSel.appendChild(o);
+                    }
+                }
+                chatStatusEl.textContent = d.ready ? '✓ ' + d.backend : 'not loaded (send to init)';
+            } catch(e) { chatStatusEl.textContent = 'unavailable'; }
+        })();
+    </script>
+</body>
+</html>

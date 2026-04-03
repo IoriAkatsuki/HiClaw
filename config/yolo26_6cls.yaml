@@ -1,0 +1,15 @@
+# 2026-03-18 正式主线运行配置
+# 当前默认检测权重来自 2026_3_12 训练工作区：
+#   2026_3_12/runs/train/yolo26n_aug_full_8419_gpu/weights/best.pt
+# 说明：
+# - 这是 6 类板卡器件检测模型
+# - 华为 Ascend OM 导出暂未完成；统一入口现阶段默认直接支持 .pt / .onnx / .om
+
+nc: 6
+names:
+  - fpga
+  - arduino
+  - stm32
+  - stlink
+  - power_module
+  - esp32

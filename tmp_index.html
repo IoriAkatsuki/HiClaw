@@ -1,0 +1,20 @@
+
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>YOLO WebUI</title></head>
+<body>
+  <h3>YOLO 实时检测</h3>
+  <div><img id="img" src="frame.jpg" style="max-width:90vw;"></div>
+  <pre id="state">loading...</pre>
+  <script>
+    async function tick() {
+      document.getElementById('img').src = 'frame.jpg?t=' + Date.now();
+      try {
+        const res = await fetch('state.json?t=' + Date.now());
+        const data = await res.json();
+        document.getElementById('state').innerText = JSON.stringify(data, null, 2);
+      } catch (e) { console.error(e); }
+      setTimeout(tick, 50);
+    }
+    tick();
+  </script>
+</body></html>

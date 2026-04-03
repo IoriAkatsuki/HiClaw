@@ -1,0 +1,404 @@
+﻿#include <iostream>
+#include <vector>
+#include <map>
+#include <chrono>
+#include <thread>
+#include <algorithm>
+#include <opencv2/opencv.hpp>
+#include "MxBase/Log/Log.h"
+#include "MxBase/MxBase.h"
+#include "MxBase/DeviceManager/DeviceManager.h"
+
+using namespace MxBase;
+using namespace std;
+
+namespace {
+    // YOLOv8 网络输入尺寸（正方形）
+    const uint32_t YOLO_INPUT_SIZE = 640;
+    // ElectroCom61 数据集类别数
+    const uint32_t NUM_CLASSES = 61;
+    // 跳采间隔：每 N 帧执行一次完整推理（其余帧复用最近一次结果，仅用于显示）
+    const uint32_t SKIP_INTERVAL = 3;  // 可按需调成 2 / 4 等
+    // 置信度与 NMS 阈值
+    const float CONF_THRESH = 0.30f;
+    const float NMS_IOU_THRESH = 0.45f;
+}
+
+struct V2Param {
+    uint32_t deviceId;
+    std::string modelPath;
+};
+
+void InitV2Param(V2Param &v2Param)
+{
+    v2Param.deviceId = 0;
+    // 直接使用绝对路径，避免执行目录变化影响
+    v2Param.modelPath = "/home/HwHiAiUser/ICT/models/yolov8_electro61.om";
+};
+
+struct DetBox {
+    float x1;
+    float y1;
+    float x2;
+    float y2;
+    float score;
+    int cls;
+};
+
+static float IoU(const DetBox &a, const DetBox &b)
+{
+    float xx1 = std::max(a.x1, b.x1);
+    float yy1 = std::max(a.y1, b.y1);
+    float xx2 = std::min(a.x2, b.x2);
+    float yy2 = std::min(a.y2, b.y2);
+    float w = std::max(0.0f, xx2 - xx1);
+    float h = std::max(0.0f, yy2 - yy1);
+    float inter = w * h;
+    float areaA = (a.x2 - a.x1) * (a.y2 - a.y1);
+    float areaB = (b.x2 - b.x1) * (b.y2 - b.y1);
+    float uni = areaA + areaB - inter;
+    if (uni <= 0.0f) return 0.0f;
+    return inter / uni;
+}
+
+static std::vector<int> NmsIndices(const std::vector<DetBox> &boxes)
+{
+    std::vector<int> indices;
+    indices.reserve(boxes.size());
+    std::vector<int> order(boxes.size());
+    for (size_t i = 0; i < boxes.size(); ++i) {
+        order[i] = static_cast<int>(i);
+    }
+    std::sort(order.begin(), order.end(), [&boxes](int lhs, int rhs) {
+        return boxes[lhs].score > boxes[rhs].score;
+    });
+
+    std::vector<bool> suppressed(boxes.size(), false);
+    for (size_t _i = 0; _i < order.size(); ++_i) {
+        int i = order[_i];
+        if (suppressed[i]) continue;
+        indices.push_back(i);
+        for (size_t _j = _i + 1; _j < order.size(); ++_j) {
+            int j = order[_j];
+            if (suppressed[j]) continue;
+            if (IoU(boxes[i], boxes[j]) > NMS_IOU_THRESH) {
+                suppressed[j] = true;
+            }
+        }
+    }
+    return indices;
+}
+
+int main(int argc, char* argv[])
+{
+    std::string camPath = "/dev/video4";
+    if (argc >= 2) camPath = argv[1];
+    std::string outDir = "/home/HwHiAiUser/webui";
+    std::string outPath = outDir + "/frame.jpg";
+    std::string logPath = outDir + "/detect.log";
+
+    V2Param v2Param;
+    InitV2Param(v2Param);
+    uint32_t deviceId = v2Param.deviceId;
+
+    APP_ERROR ret = MxInit();
+    if (ret != APP_ERR_OK) {
+        LogError << "MxInit failed, ret=" << ret;
+        return ret;
+    }
+
+    ImageProcessor imageProcessor(deviceId);
+    Model yolo(v2Param.modelPath, deviceId);
+
+    // cv::VideoCapture cap(camPath);
+    // cap.set(cv::CAP_PROP_FRAME_WIDTH, 640);
+    // cap.set(cv::CAP_PROP_FRAME_HEIGHT, 480);
+    // cap.set(cv::CAP_PROP_FPS, 15);
+    // if (!cap.isOpened()) {
+    //     LogError << "Cannot open cam: " << camPath;
+    //     return 1;
+    // }
+
+    LogInfo << "Start live YOLO in IPC mode, reading from /tmp/ipc_frame.jpg, skipInterval=" << SKIP_INTERVAL;
+
+    uint64_t frameId = 0;
+    // 最近一次推理得到的检测结果（YOLOv8 的自定义框）
+    std::vector<DetBox> lastDetBoxes;
+    double lastInferMs = 0.0;  // 最近一次推理耗时
+
+    // 性能统计：统计一小段时间内的整体显示帧率
+    auto statsStart = std::chrono::steady_clock::now();
+    uint64_t statsFrames = 0;
+
+    while (true) {
+        cv::Mat frame;
+        // cap >> frame;
+        frame = cv::imread("/tmp/ipc_frame.jpg");
+        if (frame.empty()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+
+        bool doInfer = (frameId % SKIP_INTERVAL == 0);
+        std::vector<DetBox> detBoxes;
+
+        auto tLoopStart = std::chrono::steady_clock::now();
+
+        if (doInfer) {
+            std::cout << "Do infer on frame " << frameId << std::endl;
+
+            // OpenCV 预处理：BGR -> resize -> RGB -> float32/255 -> NCHW
+            cv::Mat resized;
+            cv::resize(frame, resized, cv::Size(YOLO_INPUT_SIZE, YOLO_INPUT_SIZE));
+            resized.convertTo(resized, CV_32FC3, 1.0f / 255.0f);
+            cv::cvtColor(resized, resized, cv::COLOR_BGR2RGB);
+
+            std::vector<cv::Mat> rgbChannels(3);
+            cv::split(resized, rgbChannels);  // 每个通道 640x640
+
+            Tensor inputTensor({1, 3, YOLO_INPUT_SIZE, YOLO_INPUT_SIZE}, TensorDType::FLOAT32);
+            if (inputTensor.ToHost() != APP_ERR_OK) {
+                std::cout << "ToHost inputTensor failed" << std::endl;
+                frameId++;
+                continue;
+            }
+
+            float *dst = reinterpret_cast<float*>(inputTensor.GetData());
+            if (dst == nullptr) {
+                frameId++;
+                continue;
+            }
+            size_t planeSize = YOLO_INPUT_SIZE * YOLO_INPUT_SIZE;
+            for (int c = 0; c < 3; ++c) {
+                memcpy(dst + c * planeSize, rgbChannels[c].data, planeSize * sizeof(float));
+            }
+
+            APP_ERROR retDevice = inputTensor.ToDevice(deviceId);
+            if (retDevice != APP_ERR_OK) {
+                std::cout << "ToDevice inputTensor failed, ret=" << retDevice << std::endl;
+                frameId++;
+                continue;
+            }
+
+            std::vector<Tensor> inputs = {inputTensor};
+
+            auto tInferStart = std::chrono::steady_clock::now();
+            auto outputs = yolo.Infer(inputs);
+            for (auto &o : outputs) {
+                o.ToHost();
+            }
+            auto tInferEnd = std::chrono::steady_clock::now();
+            lastInferMs = std::chrono::duration<double, std::milli>(tInferEnd - tInferStart).count();
+
+            if (outputs.empty()) {
+                frameId++;
+                continue;
+            }
+
+            // 解析 YOLOv8 输出，假设 shape 为 [1, 65, N] 或 [1, N, 65]
+            Tensor &out = outputs[0];
+            const std::vector<uint32_t> &shape = out.GetShape();
+            if (shape.size() != 3 || shape[0] != 1) {
+                LogError << "Unexpected output shape";
+                frameId++;
+                continue;
+            }
+
+            uint32_t dim1 = shape[1];
+            uint32_t dim2 = shape[2];
+            bool layoutCHW = false;  // true: [1, 65, N], false: [1, N, 65]
+            uint32_t numAnchors = 0;
+            uint32_t numChannels = 0;
+            if (dim1 == 65) {
+                layoutCHW = true;
+                numChannels = dim1;
+                numAnchors = dim2;
+            } else if (dim2 == 65) {
+                layoutCHW = false;
+                numChannels = dim2;
+                numAnchors = dim1;
+            } else {
+                LogError << "Unexpected channel dim, neither 65xN nor Nx65";
+                frameId++;
+                continue;
+            }
+
+            float *data = reinterpret_cast<float*>(out.GetData());
+            if (data == nullptr) {
+                frameId++;
+                continue;
+            }
+
+            detBoxes.clear();
+            detBoxes.reserve(numAnchors);
+
+            float sx = static_cast<float>(frame.cols) / static_cast<float>(YOLO_INPUT_SIZE);
+            float sy = static_cast<float>(frame.rows) / static_cast<float>(YOLO_INPUT_SIZE);
+
+            for (uint32_t i = 0; i < numAnchors; ++i) {
+                float x, y, w, h;
+                const float *clsScores = nullptr;
+
+                if (layoutCHW) { // [1, 65, N]
+                    x = data[0 * numAnchors + i];
+                    y = data[1 * numAnchors + i];
+                    w = data[2 * numAnchors + i];
+                    h = data[3 * numAnchors + i];
+                    // 类别分数从通道 4 开始
+                    // data[(4 + c) * numAnchors + i]
+                    // 这里不直接取指针，多次访问时单独索引
+                } else { // [1, N, 65]
+                    const float *row = data + i * numChannels;
+                    x = row[0];
+                    y = row[1];
+                    w = row[2];
+                    h = row[3];
+                    clsScores = row + 4;
+                }
+
+                // 找最大类别与分数
+                float bestScore = 0.0f;
+                int bestCls = -1;
+                if (layoutCHW) {
+                    for (uint32_t c = 0; c < NUM_CLASSES; ++c) {
+                        float s = data[(4 + c) * numAnchors + i];
+                        if (s > bestScore) {
+                            bestScore = s;
+                            bestCls = static_cast<int>(c);
+                        }
+                    }
+                } else {
+                    for (uint32_t c = 0; c < NUM_CLASSES; ++c) {
+                        float s = clsScores[c];
+                        if (s > bestScore) {
+                            bestScore = s;
+                            bestCls = static_cast<int>(c);
+                        }
+                    }
+                }
+
+                if (bestCls < 0 || bestScore < CONF_THRESH) {
+                    continue;
+                }
+
+                // xywh -> xyxy（网络输入坐标系）
+                float x1 = x - w * 0.5f;
+                float y1 = y - h * 0.5f;
+                float x2 = x + w * 0.5f;
+                float y2 = y + h * 0.5f;
+
+                // 映射回原始图像坐标
+                DetBox box{};
+                box.x1 = x1 * sx;
+                box.y1 = y1 * sy;
+                box.x2 = x2 * sx;
+                box.y2 = y2 * sy;
+                box.score = bestScore;
+                box.cls = bestCls;
+
+                // 简单裁剪
+                box.x1 = std::max(0.0f, std::min(box.x1, static_cast<float>(frame.cols - 1)));
+                box.y1 = std::max(0.0f, std::min(box.y1, static_cast<float>(frame.rows - 1)));
+                box.x2 = std::max(0.0f, std::min(box.x2, static_cast<float>(frame.cols - 1)));
+                box.y2 = std::max(0.0f, std::min(box.y2, static_cast<float>(frame.rows - 1)));
+
+                detBoxes.push_back(box);
+            }
+
+            // 按类别做简单 NMS
+            std::vector<DetBox> nmsOut;
+            nmsOut.reserve(detBoxes.size());
+            for (uint32_t c = 0; c < NUM_CLASSES; ++c) {
+                std::vector<DetBox> clsBoxes;
+                for (const auto &b : detBoxes) {
+                    if (b.cls == static_cast<int>(c)) {
+                        clsBoxes.push_back(b);
+                    }
+                }
+                if (clsBoxes.empty()) continue;
+                std::vector<int> keep = NmsIndices(clsBoxes);
+                for (int idx : keep) {
+                    nmsOut.push_back(clsBoxes[idx]);
+                }
+            }
+
+            detBoxes.swap(nmsOut);
+            lastDetBoxes = detBoxes;  // 更新最近一次推理结果
+        } else {
+            // 跳采帧：复用最近一次推理结果，仅做显示
+            detBoxes = lastDetBoxes;
+        }
+
+        // 在当前帧上画框（无论本帧是否推理）
+        for (const auto &o : detBoxes) {
+            int x0 = static_cast<int>(o.x1);
+            int y0 = static_cast<int>(o.y1);
+            int x1 = static_cast<int>(o.x2);
+            int y1 = static_cast<int>(o.y2);
+            cv::rectangle(frame,
+                          cv::Rect(x0, y0, x1 - x0, y1 - y0),
+                          cv::Scalar(0, 255, 0),
+                          2);
+            // 这里暂时使用类别编号作为标签，后续可替换为真实类别名
+            char label[64];
+            snprintf(label, sizeof(label), "cls%d %.2f", o.cls, o.score);
+            cv::putText(frame,
+                        label,
+                        cv::Point(x0 + 5, std::max(0, y0 - 5)),
+                        cv::FONT_HERSHEY_SIMPLEX,
+                        0.6,
+                        cv::Scalar(0, 255, 0),
+                        2);
+        }
+
+        // 写当前可视帧给 WebUI
+        cv::imwrite(outPath, frame);
+
+        // 写检测日志（供网页展示）
+        FILE *fp = fopen(logPath.c_str(), "w");
+        if (fp) {
+            fprintf(fp, "objectInfos[0] size=%zu\n", detBoxes.size());
+            for (size_t j = 0; j < detBoxes.size(); ++j) {
+                const auto &o = detBoxes[j];
+                int x0 = static_cast<int>(o.x1);
+                int y0 = static_cast<int>(o.y1);
+                int x1 = static_cast<int>(o.x2);
+                int y1 = static_cast<int>(o.y2);
+                fprintf(fp,
+                        "cls=%d conf=%.3f box=(%d,%d)-(%d,%d)\n",
+                        o.cls,
+                        o.score,
+                        x0, y0, x1, y1);
+            }
+            fclose(fp);
+        }
+
+        auto tLoopEnd = std::chrono::steady_clock::now();
+        double loopMs = std::chrono::duration<double, std::milli>(tLoopEnd - tLoopStart).count();
+
+        // 性能统计：包括跳采帧在内的整体“显示帧率”
+        statsFrames++;
+        if (statsFrames >= 30) {  // 每大约 30 帧打印一次
+            auto now = std::chrono::steady_clock::now();
+            double sec = std::chrono::duration<double>(now - statsStart).count();
+            double fps = static_cast<double>(statsFrames) / sec;
+            // 将关键信息同时打到 stdout 与 MxBase 日志，便于在 live.log 中观测
+            std::cout << "[PerfStat] dispFPS=" << fps
+                      << ", skipInterval=" << SKIP_INTERVAL
+                      << ", lastInferMs=" << lastInferMs
+                      << ", lastLoopMs=" << loopMs << std::endl;
+            LogInfo << "PerfStat: dispFPS=" << fps
+                    << ", skipInterval=" << SKIP_INTERVAL
+                    << ", lastInferMs=" << lastInferMs
+                    << ", lastLoopMs=" << loopMs;
+            statsStart = now;
+            statsFrames = 0;
+        }
+
+        frameId++;
+    }
+
+    MxDeInit();
+    return 0;
+}
+
