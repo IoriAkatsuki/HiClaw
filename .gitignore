@@ -141,3 +141,9 @@ tmp_*.txt
 task_plan.md
 findings.md
 progress.md
+
+# ------------------------------
+# 根目录运行时截图
+# ------------------------------
+webui_*.jpg
+webui_*.png
