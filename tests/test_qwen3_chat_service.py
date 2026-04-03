@@ -55,6 +55,7 @@ class TestLlamaCppBackend(unittest.TestCase):
         response.__exit__ = mock.Mock(return_value=False)
 
         with mock.patch.object(module.Path, "exists", return_value=True), \
+             mock.patch.object(module.subprocess, "check_output", side_effect=module.subprocess.CalledProcessError(1, "ss")), \
              mock.patch.object(module.subprocess, "Popen", return_value=proc) as popen_mock, \
              mock.patch.object(module.time, "sleep", return_value=None), \
              mock.patch("urllib.request.urlopen", return_value=response):
