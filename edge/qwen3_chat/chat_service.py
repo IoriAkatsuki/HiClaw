@@ -105,14 +105,15 @@ class LlamaCppBackend:
                 ["ss", "-tlnp", f"sport = :{port}"],
                 stderr=subprocess.DEVNULL, timeout=5,
             ).decode()
-            for pid_s in re.findall(r"pid=(\d+)", out):
+            pids = re.findall(r"pid=(\d+)", out)
+            for pid_s in pids:
                 pid = int(pid_s)
                 if pid != os.getpid():
                     try:
                         os.kill(pid, signal.SIGTERM)
                     except (ProcessLookupError, PermissionError):
                         pass
-            if re.search(r"pid=\d+", out):
+            if pids:
                 time.sleep(0.5)
         except (subprocess.CalledProcessError, FileNotFoundError,
                 subprocess.TimeoutExpired):

@@ -14,6 +14,10 @@ from pathlib import Path
 class LaserGalvoController:
     """激光振镜控制器 - 适配STM32文本协议"""
 
+    # 无标定时的像素→振镜线性系数（像素中心对应振镜原点，坐标系反转）
+    _PX_TO_GALVO_X = 102.4  # 振镜单位/像素，X 方向
+    _PX_TO_GALVO_Y = 136.5  # 振镜单位/像素，Y 方向
+
     def __init__(self, serial_port='/dev/ttyUSB0', baudrate=115200, calibration_file=None):
         """
         初始化控制器
@@ -98,8 +102,8 @@ class LaserGalvoController:
             center_x = image_width / 2.0  # 320
             center_y = image_height / 2.0  # 240
 
-            x_galvo = int((center_x - x_pixel) * 102.4)  # 反转X
-            y_galvo = int((center_y - y_pixel) * 136.5)  # 反转Y
+            x_galvo = int((center_x - x_pixel) * self._PX_TO_GALVO_X)  # 反转X
+            y_galvo = int((center_y - y_pixel) * self._PX_TO_GALVO_Y)  # 反转Y
 
             # 限制在int16_t范围内
             x_galvo = int(np.clip(x_galvo, -32768, 32767))

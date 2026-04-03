@@ -77,15 +77,15 @@ def _load_runtime_worker_pids(ict_root: Path) -> list[int]:
     raw = state.get("worker_pids")
     if not isinstance(raw, dict):
         return []
-    pids: list[int] = []
+    pids: set[int] = set()
     for value in raw.values():
         try:
             pid = int(value)
         except (TypeError, ValueError):
             continue
-        if pid > 1 and pid not in pids:
-            pids.append(pid)
-    return pids
+        if pid > 1:
+            pids.add(pid)
+    return list(pids)
 
 
 def build_calibration_prep_shell_command(ict_root: Path) -> str:

@@ -48,6 +48,12 @@ DEPTH_SHAPE = (FRAME_HEIGHT, FRAME_WIDTH)
 OVERLAY_SHAPE = (FRAME_HEIGHT, FRAME_WIDTH, 4)
 TEXT_SLOT_SIZE = 4096
 STALE_DETECTION_FRAME_LAG_THRESHOLD = 6
+
+# MediaPipe 手部21关键点中取11个用于骨架绘制（腕+指尖+指节共11点）
+_HAND_11 = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20]
+# 11点骨架连接关系
+_HAND_11_LINES = [(0, 1), (1, 2), (0, 3), (3, 4), (0, 5), (5, 6),
+                  (0, 7), (7, 8), (0, 9), (9, 10)]
 _UM_MODULE = None
 
 
@@ -417,8 +423,6 @@ def _snapshot_objects_for_draw(snapshot: dict) -> Tuple[List[dict], Set[int]]:
 
 
 def _draw_wrist_annotations(frame: np.ndarray, wrist_annotations: list, danger_distance: float = 300.0):
-    _HAND_11_LINES = [(0, 1), (1, 2), (0, 3), (3, 4), (0, 5), (5, 6),
-                      (0, 7), (7, 8), (0, 9), (9, 10)]
     for wa in wrist_annotations:
         px, py = wa["px"], wa["py"]
         depth_mm = wa.get("depth_mm", 0.0)
@@ -816,7 +820,6 @@ def detection_worker(
             _wrist_annotations: list[dict] = []
             if not args.disable_hand and hand_results is not None:
                 if hasattr(hand_results, "multi_hand_landmarks") and hand_results.multi_hand_landmarks:
-                    _HAND_11 = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20]
                     for hand_landmarks in hand_results.multi_hand_landmarks:
                         lm = hand_landmarks.landmark
                         pts = [(int(lm[i].x * w_orig), int(lm[i].y * h_orig)) for i in _HAND_11]

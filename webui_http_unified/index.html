@@ -863,10 +863,6 @@
                             <label for="config-laser-baudrate">激光波特率</label>
                             <input id="config-laser-baudrate" type="number" min="9600" step="100">
                         </div>
-                        <div class="form-field">
-                            <label for="config-pose-model">Pose 模型路径</label>
-                            <input id="config-pose-model" type="text">
-                        </div>
                         <div class="form-field full">
                             <label for="config-data-yaml">数据配置文件</label>
                             <input id="config-data-yaml" type="text">
@@ -1045,7 +1041,6 @@
             configLaserSerial: document.getElementById("config-laser-serial"),
             configLaserBaudrate: document.getElementById("config-laser-baudrate"),
             configLaserCalibration: document.getElementById("config-laser-calibration"),
-            configPoseModel: document.getElementById("config-pose-model"),
             configDataYaml: document.getElementById("config-data-yaml"),
             markerButtons: Array.from(document.querySelectorAll(".marker-btn")),
             tabButtons: Array.from(document.querySelectorAll(".tab-btn")),
@@ -1369,7 +1364,6 @@
             DOM.configLaserSerial.value = config.laser_serial || "/dev/ttyUSB0";
             DOM.configLaserBaudrate.value = config.laser_baudrate ?? 115200;
             DOM.configLaserCalibration.value = config.laser_calibration || "";
-            DOM.configPoseModel.value = config.pose_model || "";
             DOM.configDataYaml.value = config.data_yaml || "";
         }
 
@@ -1689,7 +1683,6 @@
                 laser_serial: DOM.configLaserSerial.value.trim(),
                 laser_baudrate: Number(DOM.configLaserBaudrate.value),
                 laser_calibration: DOM.configLaserCalibration.value.trim(),
-                pose_model: DOM.configPoseModel.value.trim(),
                 data_yaml: DOM.configDataYaml.value.trim(),
                 yolo_model: DOM.modelSelect.value || appState.runtimeConfig.yolo_model,
                 marker_style: appState.markerState.marker_style || "rectangle",
@@ -1707,7 +1700,6 @@
             DOM.configLaserSerial,
             DOM.configLaserBaudrate,
             DOM.configLaserCalibration,
-            DOM.configPoseModel,
             DOM.configDataYaml,
         ].forEach((element) => {
             element.addEventListener("change", () => setPendingChanges(true));
